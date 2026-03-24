@@ -2,8 +2,12 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "Bash(venv/Scripts/python.exe -c \"from onboarder.notion.models import OnboardingInput, WikiPage; from onboarder.github.fetcher import GithubFetcher; from onboarder.tools import TOOL_DEFINITIONS; print\\(f''models ok | fetcher ok | {len\\(TOOL_DEFINITIONS\\)} tools defined''\\)\")",
-      "Bash(venv/Scripts/python.exe -c \"from onboarder.notion.models import OnboardingInput, WikiPage, WikiSection; from onboarder.github.fetcher import GithubFetcher; from onboarder.tools import TOOL_DEFINITIONS, ToolDispatcher; print\\(''all imports ok''\\)\")"
+      "Bash(venv/Scripts/python.exe -c \"from rosetta.notion.models import OnboardingInput, WikiPage; from rosetta.github.fetcher import GithubFetcher; from rosetta.tools import TOOL_DEFINITIONS; print\\(f''models ok | fetcher ok | {len\\(TOOL_DEFINITIONS\\)} tools defined''\\)\")",
+      "Bash(venv/Scripts/python.exe -c \"from rosetta.notion.models import OnboardingInput, WikiPage, WikiSection; from rosetta.github.fetcher import GithubFetcher; from rosetta.tools import TOOL_DEFINITIONS, ToolDispatcher; print\\(''all imports ok''\\)\")",
+      "Bash(venv/Scripts/python.exe -c \":*)",
+      "Bash(venv/Scripts/python.exe -m rosetta.main --help)",
+      "Bash(venv/Scripts/pip install:*)",
+      "Bash(venv/Scripts/rosetta --help)"
     ]
   }
 }

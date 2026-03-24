@@ -1,4 +1,4 @@
-# `onboarder/tools.py`
+# `rosetta/tools.py`
 
 ## What it is
 
@@ -79,7 +79,7 @@ After `create_notion_wiki` is dispatched, `dispatcher.created_wiki` holds the fu
 
 ```python
 # In agent.py (simplified)
-from onboarder.tools import TOOL_DEFINITIONS, ToolDispatcher
+from rosetta.tools import TOOL_DEFINITIONS, ToolDispatcher
 
 dispatcher = ToolDispatcher(fetcher, session, parent_page_id=NOTION_ONBOARDING_PAGE_ID)
 

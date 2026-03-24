@@ -1,4 +1,4 @@
-# `onboarder/notion/models.py`
+# `rosetta/notion/models.py`
 
 ## What it is
 
@@ -72,7 +72,7 @@ Keeping `to_notion_blocks()` on the model rather than in `mcp_session.py` means 
 ## Example
 
 ```python
-from onboarder.notion.models import OnboardingInput, WikiPage, WikiSection
+from rosetta.notion.models import OnboardingInput, WikiPage, WikiSection
 
 # Built by mcp_session.parse_db_row() in practice
 hire = OnboardingInput(

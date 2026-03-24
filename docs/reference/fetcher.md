@@ -1,4 +1,4 @@
-# `onboarder/github/fetcher.py`
+# `rosetta/github/fetcher.py`
 
 ## What it is
 
@@ -105,7 +105,7 @@ This method is not called during Milestone 1 (wiki generation). It is reserved f
 ## Example
 
 ```python
-from onboarder.github.fetcher import GithubFetcher
+from rosetta.github.fetcher import GithubFetcher
 
 fetcher = GithubFetcher(token="ghp_...")
 

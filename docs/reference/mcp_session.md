@@ -1,4 +1,4 @@
-# `onboarder/notion/mcp_session.py`
+# `rosetta/notion/mcp_session.py`
 
 ## What it is
 
@@ -86,7 +86,7 @@ On `__aenter__`, after the MCP handshake, the session immediately calls `list_to
 
 ```python
 import asyncio
-from onboarder.notion.mcp_session import NotionMCPSession
+from rosetta.notion.mcp_session import NotionMCPSession
 
 async def main():
     async with NotionMCPSession(token="secret_...") as session:

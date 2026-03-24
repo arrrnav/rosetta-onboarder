@@ -14,14 +14,14 @@ MLH AI Challenge project. A team lead fills a Notion page with new hire info →
 ## Architecture (bottom-up build order)
 
 ```
-1. onboarder/notion/models.py        — dataclasses: OnboardingInput, WikiPage, WikiSection
-2. onboarder/notion/mcp_session.py   — spawn Notion MCP server, fetch/create pages
-3. onboarder/github/fetcher.py       — GitHub API wrappers (readme, structure, issues, PRs)
-4. onboarder/tools.py                — Claude tool definitions + ToolDispatcher
-5. onboarder/agent.py                — Claude agentic loop (tool-use until wiki is written)
-6. onboarder/embeddings.py           — Gemini multimodal embeddings + in-memory vector store
-7. onboarder/chat/repl.py            — interactive Q&A REPL using RAG
-8. onboarder/main.py                 — CLI: `onboard`, `chat`, `refresh` commands
+1. rosetta/notion/models.py        — dataclasses: OnboardingInput, WikiPage, WikiSection
+2. rosetta/notion/mcp_session.py   — spawn Notion MCP server, fetch/create pages
+3. rosetta/github/fetcher.py       — GitHub API wrappers (readme, structure, issues, PRs)
+4. rosetta/tools.py                — Claude tool definitions + ToolDispatcher
+5. rosetta/agent.py                — Claude agentic loop (tool-use until wiki is written)
+6. rosetta/embeddings.py           — Gemini multimodal embeddings + in-memory vector store
+7. rosetta/chat/repl.py            — interactive Q&A REPL using RAG
+8. rosetta/main.py                 — CLI: `rosetta onboard`, `rosetta watch`, `rosetta refresh`
 ```
 
 ## Notion Workspace Layout (Option B)

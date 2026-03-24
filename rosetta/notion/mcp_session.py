@@ -132,6 +132,24 @@ class NotionMCPSession:
         )
         logger.debug("Updated row %s → Status=%s wiki_url=%s", row_id, status, wiki_url)
 
+    async def fetch_hire_row(self, row_id: str) -> OnboardingInput:
+        """
+        Fetch a single DB row by its Notion page ID and parse it into an OnboardingInput.
+
+        Used by the ``onboard <row_id>`` CLI command to process one specific hire
+        without querying the entire database.  The row_id is the page ID of the
+        database entry (the UUID in the Notion page URL).
+        """
+        result = await self._session.call_tool(
+            "notion-retrieve-page",
+            {"page_id": row_id},
+        )
+        row = _extract_json(result)
+        hire = parse_db_row(row)
+        if not hire.name:
+            raise ValueError(f"Could not parse hire data from row {row_id!r} — is it a valid New Hire Requests DB row?")
+        return hire
+
     # ------------------------------------------------------------------
     # Wiki page operations
     # ------------------------------------------------------------------
