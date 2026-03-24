@@ -37,6 +37,14 @@ class GithubFetcher:
         return self._gh.get_repo(full_name)
 
     def _check_rate_limit(self) -> None:
+        """
+        Sleep if fewer than 10 GitHub API requests remain in the current window.
+
+        10 is a conservative buffer — enough for one full tool-call sequence
+        (metadata + readme + structure + issues + PRs + contributing = 6 calls)
+        with headroom.  We sleep rather than raise so that a long-running
+        ``watch`` loop recovers automatically without losing the current job.
+        """
         rl = self._gh.get_rate_limit().core
         if rl.remaining < 10:
             reset_in = (rl.reset - __import__("datetime").datetime.utcnow()).total_seconds()
@@ -57,8 +65,17 @@ class GithubFetcher:
 
     def get_structure(self, repo_url: str, max_depth: int = 2) -> list[dict[str, Any]]:
         """
-        Return a flat list of files/dirs up to max_depth levels deep.
-        Uses the Git Trees API (single request) rather than recursive listing.
+        Return a flat list of files/dirs up to ``max_depth`` levels deep.
+
+        Uses GitHub's Git Trees API with ``recursive=True`` — a single
+        authenticated request that returns the entire tree — then filters
+        client-side by depth.  This is significantly cheaper than walking
+        directories one ``get_contents()`` call at a time, which would use
+        one API request per folder and exhaust the rate limit on large repos.
+
+        ``max_depth=2`` captures top-level files and one level of
+        subdirectories, which is enough for Claude to understand repo layout
+        without overwhelming the context window.
         """
         try:
             repo = self._get_repo(repo_url)
@@ -162,7 +179,17 @@ class GithubFetcher:
             return {"url": repo_url, "error": str(e)}
 
     def get_image_urls_from_readme(self, repo_url: str) -> list[str]:
-        """Extract image URLs embedded in the README (for multimodal indexing)."""
+        """
+        Extract image URLs embedded in the README.
+
+        Called during Milestone 2 wiki indexing to collect architecture
+        diagrams, screenshots, and badges for Gemini multimodal embedding.
+        Both Markdown ``![]()`` syntax and HTML ``<img src="">`` tags are
+        matched so repos that use either convention are handled.
+
+        Results are deduplicated (preserving order) because the same badge
+        URL often appears multiple times at the top of a README.
+        """
         readme = self.get_readme(repo_url)
         # Match markdown images: ![alt](url)
         md_images = re.findall(r"!\[.*?\]\((https?://[^\s)]+)\)", readme)

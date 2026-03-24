@@ -171,7 +171,20 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 class ToolDispatcher:
-    """Routes Claude tool_use calls to Python implementations."""
+    """
+    Routes Claude ``tool_use`` blocks to their Python implementations.
+
+    Holds references to both the ``GithubFetcher`` and ``NotionMCPSession``
+    so ``dispatch()`` can call either without the agent loop needing to know
+    which tool lives where.
+
+    State:
+        ``created_wiki`` is set to the ``WikiPage`` object the moment
+        ``create_notion_wiki`` is dispatched.  The agent loop reads this
+        after the loop ends to pass the wiki content to the Gemini embedder
+        (Milestone 2) — avoiding a second round-trip to fetch the page back
+        from Notion.
+    """
 
     def __init__(
         self,
@@ -192,8 +205,17 @@ class ToolDispatcher:
 
     async def dispatch(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """
-        Execute a tool call and return a JSON string result.
-        Returning a string keeps the tool_result content simple for Claude.
+        Execute a tool call and return the result as a plain string.
+
+        The Anthropic API requires ``tool_result`` content to be text, so
+        every return value is either already a string (README, CONTRIBUTING)
+        or serialised to JSON via ``json.dumps``.  Claude reads these strings
+        as-is and incorporates them into the next message turn.
+
+        Raises ``ValueError`` for unknown tool names — this should never
+        happen in practice because Claude only calls tools from
+        ``TOOL_DEFINITIONS``, but the explicit error makes debugging easier
+        if a tool name typo ever slips through.
         """
         logger.debug("Tool call: %s(%s)", tool_name, json.dumps(tool_input)[:200])
 

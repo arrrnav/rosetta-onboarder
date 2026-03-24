@@ -72,7 +72,14 @@ class NotionMCPSession:
     async def query_pending_hires(self, database_id: str) -> list[OnboardingInput]:
         """
         Query the New Hire Requests database for rows where Status = 'Ready'.
-        Returns a list of OnboardingInput objects ready to process.
+
+        Filters server-side using Notion's select filter so only actionable
+        rows are returned — the polling loop never has to inspect rows that
+        are already Processing or Done.
+
+        Returns a list of fully parsed ``OnboardingInput`` objects. Rows
+        whose ``Name`` property is empty are skipped with a warning (they
+        are likely template/header rows accidentally set to Ready).
         """
         result = await self._session.call_tool(
             "notion-query-database",
@@ -101,8 +108,14 @@ class NotionMCPSession:
         wiki_url: str | None = None,
     ) -> None:
         """
-        Update the Status property (and optionally the Wiki URL property) on a DB row.
-        Called after wiki generation to mark the hire as processed.
+        Update the Status (and optionally Wiki URL) properties on a DB row.
+
+        Both writes are sent in a single ``notion-update-page`` call to keep
+        the row transition atomic — the team lead's board view always shows a
+        consistent state.  Typical call sequence:
+
+        1. ``update_hire_row(row_id, "Processing")``   — before generation starts
+        2. ``update_hire_row(row_id, "Done", wiki_url)`` — after wiki is created
         """
         properties: dict[str, Any] = {
             "Status": {"select": {"name": status}},
@@ -232,13 +245,25 @@ def parse_db_row(row: dict[str, Any]) -> OnboardingInput:
 # ------------------------------------------------------------------
 
 def _read_title(props: dict[str, Any], key: str) -> str:
-    """Read a Notion title property."""
+    """
+    Read a Notion title property and return its plain text.
+
+    Notion represents all rich-text fields (including titles) as arrays of
+    span objects — e.g. ``[{"plain_text": "Jane"}, {"plain_text": " Smith"}]``.
+    We join all spans because a single visible "word" can be split across
+    multiple spans (e.g. if part of it is bolded or linked).
+    """
     items = props.get(key, {}).get("title", [])
     return "".join(item.get("plain_text", "") for item in items).strip()
 
 
 def _read_rich_text(props: dict[str, Any], key: str) -> str:
-    """Read a Notion rich_text property."""
+    """
+    Read a Notion rich_text property and return its plain text.
+
+    Same span-array behaviour as ``_read_title`` — see that function's
+    docstring for why we join spans rather than taking ``[0]["plain_text"]``.
+    """
     items = props.get(key, {}).get("rich_text", [])
     return "".join(item.get("plain_text", "") for item in items).strip()
 
@@ -262,7 +287,13 @@ def _extract_text(result: Any) -> str:
 
 
 def _extract_json(result: Any) -> dict[str, Any]:
-    """Pull JSON dict out of an MCP tool call result."""
+    """
+    Parse an MCP tool call result as a JSON dict.
+
+    Logs the first 300 characters of the raw response on failure — enough
+    to diagnose auth errors or unexpected HTML error pages without flooding
+    the log with a full Notion API response body.
+    """
     import json
     text = _extract_text(result)
     try:
