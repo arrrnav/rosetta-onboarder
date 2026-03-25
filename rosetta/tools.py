@@ -202,6 +202,7 @@ class ToolDispatcher:
         self._max_prs = max_prs
         self._tree_depth = tree_depth
         self.created_wiki: WikiPage | None = None
+        self.created_wiki_page_id: str = ""
 
     async def dispatch(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """
@@ -259,7 +260,8 @@ class ToolDispatcher:
             ]
             wiki = WikiPage(title=tool_input["title"], sections=sections)
             self.created_wiki = wiki
-            url = await self._notion.create_wiki_page(wiki, self._parent_page_id)
+            url, page_id = await self._notion.create_wiki_page(wiki, self._parent_page_id)
+            self.created_wiki_page_id = page_id
             return f"Wiki created successfully. URL: {url}"
 
         raise ValueError(f"Unknown tool: {tool_name!r}")

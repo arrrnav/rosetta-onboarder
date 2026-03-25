@@ -1,6 +1,10 @@
 """
 Async context manager for communicating with the Notion MCP server via stdio.
 
+Uses @notionhq/notion-mcp-server (npm package, stdio transport) which exposes
+raw Notion REST API wrappers under API-prefixed tool names, e.g.:
+  API-retrieve-a-page, API-patch-page, API-post-page, API-patch-block-children
+
 Usage:
     async with NotionMCPSession(token=settings.notion_token) as session:
         hires = await session.query_pending_hires(db_id)
@@ -33,8 +37,8 @@ class NotionMCPSession:
 
     async def __aenter__(self) -> "NotionMCPSession":
         server_params = StdioServerParameters(
-            command="npx",
-            args=["-y", "@notionhq/notion-mcp-server"],
+            command="notion-mcp-server",
+            args=[],
             env={
                 **os.environ,
                 "NOTION_TOKEN": self._token,
@@ -82,9 +86,9 @@ class NotionMCPSession:
         are likely template/header rows accidentally set to Ready).
         """
         result = await self._session.call_tool(
-            "notion-query-database",
+            "API-query-data-source",
             {
-                "database_id": database_id,
+                "data_source_id": database_id,
                 "filter": {
                     "property": "Status",
                     "select": {"equals": "Ready"},
@@ -110,9 +114,9 @@ class NotionMCPSession:
         """
         Update the Status (and optionally Wiki URL) properties on a DB row.
 
-        Both writes are sent in a single ``notion-update-page`` call to keep
-        the row transition atomic — the team lead's board view always shows a
-        consistent state.  Typical call sequence:
+        Both writes are sent in a single API-patch-page call to keep the row
+        transition atomic — the team lead's board view always shows a consistent
+        state.  Typical call sequence:
 
         1. ``update_hire_row(row_id, "Processing")``   — before generation starts
         2. ``update_hire_row(row_id, "Done", wiki_url)`` — after wiki is created
@@ -124,7 +128,7 @@ class NotionMCPSession:
             properties["Wiki URL"] = {"url": wiki_url}
 
         await self._session.call_tool(
-            "notion-update-page",
+            "API-patch-page",
             {
                 "page_id": row_id,
                 "properties": properties,
@@ -139,26 +143,37 @@ class NotionMCPSession:
         Used by the ``onboard <row_id>`` CLI command to process one specific hire
         without querying the entire database.  The row_id is the page ID of the
         database entry (the UUID in the Notion page URL).
+
+        API-retrieve-a-page returns the raw Notion REST API JSON, which is parsed
+        by ``parse_db_row`` into an OnboardingInput.
         """
         result = await self._session.call_tool(
-            "notion-retrieve-page",
+            "API-retrieve-a-page",
             {"page_id": row_id},
         )
         row = _extract_json(result)
         hire = parse_db_row(row)
         if not hire.name:
-            raise ValueError(f"Could not parse hire data from row {row_id!r} — is it a valid New Hire Requests DB row?")
+            raise ValueError(
+                f"Could not parse hire data from row {row_id!r} — "
+                "is it a valid New Hire Requests DB row?"
+            )
         return hire
 
     # ------------------------------------------------------------------
     # Wiki page operations
     # ------------------------------------------------------------------
 
-    async def create_wiki_page(self, wiki: WikiPage, parent_page_id: str) -> str:
-        """Create a Notion page from a WikiPage under the given parent. Returns the new page URL."""
+    async def create_wiki_page(self, wiki: WikiPage, parent_page_id: str) -> tuple[str, str]:
+        """Create a Notion page from a WikiPage under the given parent.
+
+        Returns:
+            (url, page_id) — the Notion URL and the raw page ID of the created page.
+            The page_id is needed to append blocks (embed, refresh) and for the chat URL.
+        """
         blocks = wiki.to_notion_blocks()
         result = await self._session.call_tool(
-            "notion-create-pages",
+            "API-post-page",
             {
                 "parent": {"page_id": parent_page_id},
                 "properties": {
@@ -167,15 +182,21 @@ class NotionMCPSession:
                 "children": blocks,
             },
         )
+        raw = _extract_json(result)
+        page_id = raw.get("id", "")
+        url = raw.get("url", "")
+        if url:
+            return url, page_id
+        # Fallback: scan text for a notion.so URL
         text = _extract_text(result)
         logger.debug("create_wiki_page result: %s", text[:200])
         url_match = re.search(r"https://www\.notion\.so/\S+", text)
-        return url_match.group(0) if url_match else text
+        return (url_match.group(0) if url_match else text), page_id
 
     async def append_embed_block(self, page_id: str, embed_url: str) -> None:
         """Append an iframe embed block to an existing page (used to add the chat widget)."""
         await self._session.call_tool(
-            "notion-append-block-children",
+            "API-patch-block-children",
             {
                 "block_id": page_id,
                 "children": [
@@ -189,7 +210,7 @@ class NotionMCPSession:
     ) -> None:
         """Append refreshed content blocks to a page (used by the refresh command)."""
         await self._session.call_tool(
-            "notion-append-block-children",
+            "API-patch-block-children",
             {
                 "block_id": page_id,
                 "children": [
@@ -222,7 +243,8 @@ class NotionMCPSession:
 
 def parse_db_row(row: dict[str, Any]) -> OnboardingInput:
     """
-    Parse a Notion DB row (as returned by notion-query-database) into an OnboardingInput.
+    Parse a Notion DB row (as returned by API-retrieve-a-page or API-query-data-source)
+    into an OnboardingInput.
 
     Expected DB columns:
         Name        — title property (new hire's full name)

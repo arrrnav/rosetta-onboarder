@@ -90,7 +90,7 @@ async def run_onboarding_agent(
     notion_session: NotionMCPSession,
     parent_page_id: str,
     model: str | None = None,
-    max_iterations: int = 40,
+    max_iterations: int = 15,
 ) -> tuple[str, WikiPage]:
     """
     Run the Claude agentic loop for one new hire.
@@ -114,7 +114,7 @@ async def run_onboarding_agent(
     Raises:
         RuntimeError: if the agent exhausts max_iterations without writing the wiki.
     """
-    resolved_model = model or os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+    resolved_model = model or os.getenv("CLAUDE_MODEL")#, "claude-sonnet-4-6")
     client = anthropic.AsyncAnthropic()
 
     dispatcher = ToolDispatcher(

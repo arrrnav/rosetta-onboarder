@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 
 import typer
 from dotenv import load_dotenv
@@ -69,7 +70,8 @@ def onboard(
     parent page.  Updates the DB row with Status=Done and the wiki URL when
     complete.
     """
-    load_dotenv()
+    load_dotenv(dotenv_path=Path(__file__).parents[2] / ".env")          # secrets (A:\Programming\.env)
+    load_dotenv(dotenv_path=Path(__file__).parents[1] / ".env")          # project config (rosetta-onboarder\.env)
     _setup_logging(os.getenv("LOG_LEVEL", "INFO"))
 
     notion_token = _require_env("NOTION_TOKEN")
