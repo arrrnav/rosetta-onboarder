@@ -91,12 +91,12 @@ async def run_onboarding_agent(
     parent_page_id: str,
     model: str | None = None,
     max_iterations: int = 15,
-) -> tuple[str, WikiPage]:
+) -> tuple[str, str, WikiPage]:
     """
     Run the Claude agentic loop for one new hire.
 
     Calls tools until ``create_notion_wiki`` is dispatched, then returns the
-    wiki URL and the ``WikiPage`` object (for downstream RAG indexing in M2).
+    wiki URL, wiki page ID, and the ``WikiPage`` object.
 
     Args:
         hire:             Parsed new hire data from the Notion DB row.
@@ -108,8 +108,8 @@ async def run_onboarding_agent(
         max_iterations:   Safety cap on the number of Claude API calls.
 
     Returns:
-        (wiki_url, wiki_page) — the Notion URL of the created page and the
-        WikiPage object.
+        (wiki_url, wiki_page_id, wiki_page) — the Notion URL, raw page ID, and the
+        WikiPage object (for downstream RAG indexing).
 
     Raises:
         RuntimeError: if the agent exhausts max_iterations without writing the wiki.
@@ -189,4 +189,4 @@ async def run_onboarding_agent(
             f"without calling create_notion_wiki"
         )
 
-    return wiki_url, dispatcher.created_wiki
+    return wiki_url, dispatcher.created_wiki_page_id, dispatcher.created_wiki

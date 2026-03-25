@@ -28,6 +28,8 @@ Welcome to Rosetta Setup
 
 After confirming, writes all values to `.env` and verifies connectivity (pings each API). The team lead never touches a config file.
 
+Step 5 should also prompt the team lead to set the "Engineering Onboarding" parent page to **Share to web → Anyone with the link can view** in Notion — with a direct link to the page. Child wikis inherit this setting, so it only needs to be done once. The setup wizard should confirm it's been done before finishing.
+
 **What needs to be built:**
 - `rosetta/cli/setup.py` — Textual app with a multi-step form
 - Connectivity checks: Notion token → list pages, GitHub token → check rate limit, Anthropic/Gemini → lightweight ping
@@ -74,6 +76,25 @@ CONTRIBUTE.md
 ```
 
 This is a small, self-contained change with no API or config implications.
+
+---
+
+## Chat RAG
+
+### Index raw README content alongside wiki sections
+
+**Current behaviour:** The chat RAG only indexes the 8 generated wiki sections. Claude already synthesised these from the READMEs, so most questions are covered.
+
+**Goal:** Also chunk and embed the raw README text for each assigned repo. A new hire asking very specific technical questions ("what's the exact flag to skip integration tests?", "which Node version is pinned in .nvmrc?") would get better answers from the source README than from the wiki summary.
+
+**Implementation sketch:**
+- After wiki creation, call `fetcher.get_readme(repo_url)` for each repo
+- Split into overlapping chunks (~400 tokens, 50-token stride)
+- Embed each chunk with `gemini-embedding-2-preview` (same model, `RETRIEVAL_DOCUMENT` task type)
+- Label chunks as `"README ({owner}/{repo}): ..."` so Claude can cite the source
+- Save alongside wiki section chunks in the same `VectorStore` pickle
+
+**Why deferred:** The wiki sections alone tell a clear demo story. Adding READMEs increases embedding time and Gemini API cost during `rosetta onboard`, and adds chunking complexity. Revisit once M2 is proven.
 
 ---
 

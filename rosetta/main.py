@@ -4,6 +4,7 @@ CLI entry point for the Notion Onboarding Agent.
 Install the package with ``pip install -e .`` then run:
 
     rosetta onboard <notion-db-row-id>
+    rosetta serve                          — start the RAG chat server (Milestone 2)
 
 Future commands (added in later milestones):
     rosetta watch     — poll DB every 5 minutes (Milestone 3)
@@ -121,7 +122,7 @@ async def _run_onboard(
         await session.update_hire_row(row_id, "Processing")
 
         try:
-            wiki_url, _wiki = await run_onboarding_agent(
+            wiki_url, wiki_page_id, wiki = await run_onboarding_agent(
                 hire=hire,
                 fetcher=fetcher,
                 notion_session=session,
@@ -139,6 +140,93 @@ async def _run_onboard(
         await session.update_hire_row(row_id, "Done", wiki_url=wiki_url)
         console.print(f"\n[bold green]Done![/bold green] Wiki created for {hire.name}")
         console.print(f"  {wiki_url}")
+
+        # -- Milestone 2: index wiki for chat RAG --
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        if gemini_key:
+            from .embeddings import index_wiki
+            from .github.fetcher import GithubFetcher as _GF  # already imported above
+            data_dir = Path(os.getenv("CHAT_DATA_DIR", "data"))
+            # Collect README image URLs from all repos for multimodal embedding
+            image_urls: list[str] = []
+            for repo_url in hire.repo_urls:
+                try:
+                    image_urls.extend(fetcher.get_image_urls_from_readme(repo_url))
+                except Exception:
+                    pass
+            console.print("[dim]Indexing wiki for chat RAG…[/dim]")
+            try:
+                index_wiki(wiki, wiki_page_id, data_dir, image_urls=image_urls)
+                console.print("[dim]Embeddings saved.[/dim]")
+            except Exception as exc:
+                console.print(f"[yellow]Warning:[/yellow] Embedding failed — {exc}")
+                console.print("[dim]Chat will be unavailable for this wiki.[/dim]")
+        else:
+            console.print(
+                "[yellow]Note:[/yellow] GEMINI_API_KEY not set — skipping chat indexing."
+            )
+            wiki_page_id = ""  # signal: no iframe to append
+
+        # Append chat widget iframe to the wiki page
+        chat_url = os.environ.get("CHAT_SERVER_URL", "").rstrip("/")
+        if chat_url and wiki_page_id:
+            embed_url = f"{chat_url}/chat/{wiki_page_id}"
+            try:
+                await session.append_embed_block(wiki_page_id, embed_url)
+                console.print(f"[dim]Chat widget embedded: {embed_url}[/dim]")
+            except Exception as exc:
+                console.print(f"[yellow]Warning:[/yellow] Could not embed chat widget — {exc}")
+        elif not chat_url:
+            console.print(
+                "\n[dim]Tip:[/dim] Set CHAT_SERVER_URL and run [bold]rosetta serve[/bold] "
+                "to add an interactive chat widget to the wiki."
+            )
+
+
+# ---------------------------------------------------------------------------
+# serve command (Milestone 2)
+# ---------------------------------------------------------------------------
+
+@app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", help="Host to bind the chat server to."),
+    port: int = typer.Option(8000, help="Port to listen on."),
+) -> None:
+    """
+    Start the RAG chat server.
+
+    The server loads wiki embeddings from CHAT_DATA_DIR (default: ./data) and
+    serves a chat widget at /chat/<wiki_page_id>.
+
+    For a public URL (needed for the Notion iframe), run:
+
+        ngrok http 8000
+
+    Then set CHAT_SERVER_URL to the ngrok URL in your .env before running
+    rosetta onboard.
+    """
+    load_dotenv(dotenv_path=Path(__file__).parents[2] / ".env")
+    load_dotenv(dotenv_path=Path(__file__).parents[1] / ".env")
+    _setup_logging(os.getenv("LOG_LEVEL", "INFO"))
+
+    try:
+        import uvicorn
+    except ImportError:
+        console.print("[bold red]Error:[/bold red] uvicorn is not installed. "
+                      "Run: pip install uvicorn")
+        raise typer.Exit(code=1)
+
+    console.print(f"[bold green]Starting chat server[/bold green] on {host}:{port}")
+    console.print(f"  Chat widget: [link]http://localhost:{port}/chat/<wiki_page_id>[/link]")
+    console.print(f"  Health check: [link]http://localhost:{port}/health[/link]")
+    console.print("[dim]Press Ctrl+C to stop.[/dim]\n")
+
+    uvicorn.run(
+        "rosetta.chat.server:app",
+        host=host,
+        port=port,
+        log_level=os.getenv("LOG_LEVEL", "info").lower(),
+    )
 
 
 # ---------------------------------------------------------------------------
