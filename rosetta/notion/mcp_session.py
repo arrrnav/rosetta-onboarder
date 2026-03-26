@@ -160,6 +160,29 @@ class NotionMCPSession:
             )
         return hire
 
+    async def fetch_page_status(self, page_id: str) -> str:
+        """Return the current Status select value for a DB row (e.g. 'Ready', 'Done').
+
+        Returns an empty string if the page cannot be fetched or has no Status property.
+        Used by the webhook handler to guard against re-processing rows that are
+        already Processing or Done.
+        """
+        try:
+            result = await self._session.call_tool(
+                "API-retrieve-a-page",
+                {"page_id": page_id},
+            )
+            raw = _extract_json(result)
+            return (
+                raw.get("properties", {})
+                   .get("Status", {})
+                   .get("select", {})
+                   .get("name", "")
+            )
+        except Exception:
+            logger.exception("fetch_page_status failed for %s", page_id)
+            return ""
+
     # ------------------------------------------------------------------
     # Wiki page operations
     # ------------------------------------------------------------------

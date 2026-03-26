@@ -3,11 +3,15 @@ CLI entry point for the Notion Onboarding Agent.
 
 Install the package with ``pip install -e .`` then run:
 
-    rosetta onboard <notion-db-row-id>
-    rosetta serve                          — start the RAG chat server (Milestone 2)
+    rosetta onboard <notion-db-row-id>   — generate wiki for one hire (manual trigger)
+    rosetta serve                         — start chat server + Notion webhook listener
 
-Future commands (added in later milestones):
-    rosetta watch     — poll DB every 5 minutes (Milestone 3)
+Webhook auto-trigger (Milestone 3):
+    Set NOTION_WEBHOOK_SECRET and point your Notion integration's webhook at
+    {CHAT_SERVER_URL}/webhook/notion.  When a DB row's Status is set to Ready,
+    Notion fires page.properties_updated and rosetta serve processes it automatically.
+
+Future commands:
     rosetta refresh   — re-fetch issues/PRs for an existing wiki (Milestone 5)
     rosetta setup     — interactive first-time configuration (Future Goals)
 """
