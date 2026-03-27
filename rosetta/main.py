@@ -82,7 +82,7 @@ def onboard(
     notion_token = _require_env("NOTION_TOKEN")
     parent_page_id = _require_env("NOTION_ONBOARDING_PAGE_ID")
     github_token = os.environ.get("GITHUB_TOKEN")   # optional but strongly recommended
-    model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
     if not github_token:
         console.print("[yellow]Warning:[/yellow] GITHUB_TOKEN not set — "

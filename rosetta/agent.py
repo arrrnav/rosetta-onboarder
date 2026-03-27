@@ -104,7 +104,7 @@ async def run_onboarding_agent(
         notion_session:   Active NotionMCPSession (must be used inside ``async with``).
         parent_page_id:   Notion page ID of the "Engineering Onboarding" parent page.
         model:            Claude model string. Defaults to CLAUDE_MODEL env var or
-                          ``claude-sonnet-4-6``.
+                          ``claude-haiku-4-5-20251001``.
         max_iterations:   Safety cap on the number of Claude API calls.
 
     Returns:

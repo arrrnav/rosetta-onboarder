@@ -146,6 +146,9 @@ class VectorStore:
             len(wiki.sections),
             len(chunks) - len(wiki.sections),
         )
+        if not chunks:
+            logger.warning("No chunks to embed — creating empty VectorStore")
+            return cls(chunks=[], embeddings=np.empty((0, 0), dtype=np.float32))
         return cls(
             chunks=chunks,
             embeddings=np.array(vecs, dtype=np.float32),
@@ -162,6 +165,8 @@ class VectorStore:
         Uses cosine similarity between the query embedding and all stored
         chunk embeddings.
         """
+        if len(self.chunks) == 0:
+            return []
         genai = _configure_genai()
         q_vec = np.array(
             _embed_text(genai, query, "RETRIEVAL_QUERY"),

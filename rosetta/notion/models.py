@@ -110,6 +110,11 @@ class WikiPage:
         for section in self.sections:
             blocks.append(_heading_block(2, section.heading))
             blocks.extend(_markdown_to_blocks(section.content))
+        if len(blocks) > 95:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Wiki has %d blocks — truncating to 95 (Notion limit)", len(blocks),
+            )
         return blocks[:95]
 
 

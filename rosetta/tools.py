@@ -259,8 +259,8 @@ class ToolDispatcher:
                 for s in tool_input["sections"]
             ]
             wiki = WikiPage(title=tool_input["title"], sections=sections)
-            self.created_wiki = wiki
             url, page_id = await self._notion.create_wiki_page(wiki, self._parent_page_id)
+            self.created_wiki = wiki
             self.created_wiki_page_id = page_id
             return f"Wiki created successfully. URL: {url}"
 

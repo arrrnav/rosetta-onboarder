@@ -84,7 +84,7 @@ class GithubFetcher:
             entries = []
             for item in tree.tree:
                 depth = item.path.count("/")
-                if depth < max_depth:
+                if depth <= max_depth:
                     entries.append({
                         "path": item.path,
                         "type": item.type,  # "blob" or "tree"
