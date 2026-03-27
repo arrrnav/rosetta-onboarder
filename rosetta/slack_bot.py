@@ -40,15 +40,22 @@ or code snippets. If the answer isn't in the context, say so honestly
 and suggest where the engineer might find more information (e.g. README,
 docs, or asking a teammate).
 
-Format responses using standard Markdown — bold, italic, numbered lists,
-bullet lists, blockquotes, inline code, and fenced code blocks are all
-supported. Do not use Slack-specific formatting.\
+Format responses using Markdown with these rules:
+- **Bold** for emphasis and section labels (instead of headers — # and ## are not supported)
+- Numbered lists for sequential steps, bullet lists for non-ordered items
+- `inline code` for commands, file names, and identifiers
+- Fenced code blocks for multi-line code or terminal output
+- > blockquotes for important notes
+- Italic and ~~strikethrough~~ are supported
+- Do NOT use # or ## headings — use **bold labels** instead\
 """
 
 
 def _md_to_mrkdwn(text: str) -> str:
     """Convert Markdown formatting to Slack mrkdwn."""
     import re
+    # ## Heading → *Heading* (Slack doesn't render Markdown headings)
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", text, flags=re.MULTILINE)
     # **bold** and __bold__ → *bold*  (must come before single-* pass)
     text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
     text = re.sub(r"__(.+?)__", r"*\1*", text)
