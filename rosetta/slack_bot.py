@@ -34,11 +34,31 @@ You are a helpful onboarding assistant for a new software engineer.
 Answer questions about their assigned repositories, codebase setup,
 team conventions, and onboarding wiki using the provided context.
 
-Be concise, friendly, and practical. Use bullet points for steps.
-If the answer isn't in the context, say so honestly and suggest
-where the engineer might find more information (e.g. README, docs,
-or asking a teammate).\
+Be concise, friendly, and practical. Use numbered lists for sequential
+steps, bullet lists for non-ordered items, and code blocks for commands
+or code snippets. If the answer isn't in the context, say so honestly
+and suggest where the engineer might find more information (e.g. README,
+docs, or asking a teammate).
+
+Format responses using standard Markdown — bold, italic, numbered lists,
+bullet lists, blockquotes, inline code, and fenced code blocks are all
+supported. Do not use Slack-specific formatting.\
 """
+
+
+def _md_to_mrkdwn(text: str) -> str:
+    """Convert Markdown formatting to Slack mrkdwn."""
+    import re
+    # **bold** and __bold__ → *bold*  (must come before single-* pass)
+    text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+    text = re.sub(r"__(.+?)__", r"*\1*", text)
+    # *italic* → _italic_  (single * not preceded/followed by another *)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"_\1_", text)
+    # ~~strikethrough~~ → ~strikethrough~
+    text = re.sub(r"~~(.+?)~~", r"~\1~", text)
+    # [text](url) → <url|text>
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", text)
+    return text
 
 
 def _load_mapping(data_dir: Path) -> dict[str, str]:
@@ -179,7 +199,7 @@ async def start_bot(data_dir: Path) -> None:
             )
             return
 
-        await web_client.chat_postMessage(channel=channel, text=answer)
+        await web_client.chat_postMessage(channel=channel, text=_md_to_mrkdwn(answer))
         logger.info("Slack bot answered question for user %s (wiki %s)", user_id, wiki_page_id)
 
     socket_client = SocketModeClient(app_token=app_token, web_client=web_client)

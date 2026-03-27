@@ -191,8 +191,17 @@ class NotionMCPSession:
         Returns:
             (url, page_id) — the Notion URL and the raw page ID of the created page.
             The page_id is needed to append blocks (embed, refresh) and for the chat URL.
+
+        Notion accepts at most 100 children per API call.  We use a batch
+        size of 95 (leaving headroom for the title block) and append the
+        overflow via ``API-patch-block-children``.
         """
+        BATCH = 95
         blocks = wiki.to_notion_blocks()
+        logger.info("Wiki has %d blocks — sending in %d batch(es)",
+                     len(blocks), -(-len(blocks) // BATCH))
+
+        # Create the page with the first batch
         result = await self._session.call_tool(
             "API-post-page",
             {
@@ -200,19 +209,29 @@ class NotionMCPSession:
                 "properties": {
                     "title": [{"text": {"content": wiki.title}}]
                 },
-                "children": blocks,
+                "children": blocks[:BATCH],
             },
         )
         raw = _extract_json(result)
         page_id = raw.get("id", "")
         url = raw.get("url", "")
-        if url:
-            return url, page_id
-        # Fallback: scan text for a notion.so URL
-        text = _extract_text(result)
-        logger.debug("create_wiki_page result: %s", text[:200])
-        url_match = re.search(r"https://www\.notion\.so/\S+", text)
-        return (url_match.group(0) if url_match else text), page_id
+        if not url:
+            text = _extract_text(result)
+            logger.debug("create_wiki_page result: %s", text[:200])
+            url_match = re.search(r"https://www\.notion\.so/\S+", text)
+            url = url_match.group(0) if url_match else text
+
+        # Append remaining blocks in batches
+        for i in range(BATCH, len(blocks), BATCH):
+            batch = blocks[i : i + BATCH]
+            logger.info("Appending blocks %d–%d of %d",
+                        i + 1, i + len(batch), len(blocks))
+            await self._session.call_tool(
+                "API-patch-block-children",
+                {"block_id": page_id, "children": batch},
+            )
+
+        return url, page_id
 
     async def append_embed_block(self, page_id: str, embed_url: str) -> None:
         """Append an iframe embed block to an existing page (used to add the chat widget)."""

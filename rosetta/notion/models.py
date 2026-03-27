@@ -103,19 +103,13 @@ class WikiPage:
 
         Notion's hard limits handled here:
           - rich_text content is chunked at 2000 chars per block.
-          - Total block count is capped at 95 per call (Notion max is 100;
-            we leave a small buffer for the title block added by the caller).
+          - Batching (handled by the caller) sends blocks in groups of 95.
         """
         blocks: list[dict] = []
         for section in self.sections:
             blocks.append(_heading_block(2, section.heading))
             blocks.extend(_markdown_to_blocks(section.content))
-        if len(blocks) > 95:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Wiki has %d blocks — truncating to 95 (Notion limit)", len(blocks),
-            )
-        return blocks[:95]
+        return blocks
 
 
 # ---------------------------------------------------------------------------
