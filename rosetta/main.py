@@ -149,7 +149,6 @@ async def _run_onboard(
         gemini_key = os.environ.get("GEMINI_API_KEY")
         if gemini_key:
             from .embeddings import index_wiki
-            from .github.fetcher import GithubFetcher as _GF  # already imported above
             data_dir = Path(os.getenv("CHAT_DATA_DIR", "data"))
             # Collect README image URLs from all repos for multimodal embedding
             image_urls: list[str] = []
@@ -169,22 +168,10 @@ async def _run_onboard(
             console.print(
                 "[yellow]Note:[/yellow] GEMINI_API_KEY not set — skipping chat indexing."
             )
-            wiki_page_id = ""  # signal: no iframe to append
 
-        # Append chat widget iframe to the wiki page
-        chat_url = os.environ.get("CHAT_SERVER_URL", "").rstrip("/")
-        if chat_url and wiki_page_id:
-            embed_url = f"{chat_url}/chat/{wiki_page_id}"
-            try:
-                await session.append_embed_block(wiki_page_id, embed_url)
-                console.print(f"[dim]Chat widget embedded: {embed_url}[/dim]")
-            except Exception as exc:
-                console.print(f"[yellow]Warning:[/yellow] Could not embed chat widget — {exc}")
-        elif not chat_url:
-            console.print(
-                "\n[dim]Tip:[/dim] Set CHAT_SERVER_URL and run [bold]rosetta serve[/bold] "
-                "to add an interactive chat widget to the wiki."
-            )
+        # -- Milestone 4: notify the new hire --
+        from .notify import notify_hire
+        notify_hire(hire, wiki_url, wiki_page_id=wiki_page_id)
 
 
 # ---------------------------------------------------------------------------

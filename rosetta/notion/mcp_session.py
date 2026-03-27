@@ -173,12 +173,10 @@ class NotionMCPSession:
                 {"page_id": page_id},
             )
             raw = _extract_json(result)
-            return (
-                raw.get("properties", {})
-                   .get("Status", {})
-                   .get("select", {})
-                   .get("name", "")
-            )
+            props = raw.get("properties") or {}
+            status_prop = props.get("Status") or {}
+            select = status_prop.get("select") or {}
+            return select.get("name", "")
         except Exception:
             logger.exception("fetch_page_status failed for %s", page_id)
             return ""
@@ -286,6 +284,8 @@ def parse_db_row(row: dict[str, Any]) -> OnboardingInput:
     notes = _read_rich_text(props, "Notes")
     repos_raw = _read_rich_text(props, "GitHub Repos")
     repo_urls = _extract_github_urls(repos_raw)
+    contact_email = _read_email(props, "Contact Email")
+    slack_handle = _read_rich_text(props, "Slack Handle").lstrip("@")
 
     if not name:
         logger.warning("DB row %s: 'Name' property is empty", row_id)
@@ -300,6 +300,8 @@ def parse_db_row(row: dict[str, Any]) -> OnboardingInput:
         repo_urls=repo_urls,
         notes=notes,
         db_row_id=row_id,
+        contact_email=contact_email,
+        slack_handle=slack_handle,
     )
 
 
@@ -329,6 +331,11 @@ def _read_rich_text(props: dict[str, Any], key: str) -> str:
     """
     items = props.get(key, {}).get("rich_text", [])
     return "".join(item.get("plain_text", "") for item in items).strip()
+
+
+def _read_email(props: dict[str, Any], key: str) -> str:
+    """Read a Notion email property and return the address string, or empty string."""
+    return props.get(key, {}).get("email") or ""
 
 
 def _extract_github_urls(text: str) -> list[str]:

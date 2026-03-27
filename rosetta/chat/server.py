@@ -22,11 +22,13 @@ Webhook flow (M3):
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import anthropic
@@ -38,7 +40,27 @@ from ..embeddings import VectorStore
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Rosetta Onboarding Chat")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Start the Slack bot (Socket Mode) alongside uvicorn, if configured."""
+    task: asyncio.Task | None = None
+    app_token = os.getenv("SLACK_APP_TOKEN", "")
+    if app_token:
+        from ..slack_bot import start_bot
+        data_dir = Path(os.getenv("CHAT_DATA_DIR", "data"))
+        task = asyncio.create_task(start_bot(data_dir))
+        logger.info("Slack bot task created.")
+    yield
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="Rosetta Onboarding Chat", lifespan=_lifespan)
 
 # In-memory cache: wiki_page_id → VectorStore
 _store_cache: dict[str, VectorStore] = {}
@@ -266,7 +288,7 @@ async def _handle_hire_if_ready(page_id: str) -> None:
             await session.update_hire_row(page_id, "Done", wiki_url=wiki_url)
             logger.info("Webhook: wiki created for %s — %s", hire.name, wiki_url)
 
-            # Index embeddings + append chat embed
+            # Index embeddings for RAG chat
             gemini_key = os.getenv("GEMINI_API_KEY")
             if gemini_key and wiki_page_id:
                 try:
@@ -278,16 +300,15 @@ async def _handle_hire_if_ready(page_id: str) -> None:
                             pass
                     data_dir = Path(os.getenv("CHAT_DATA_DIR", "data"))
                     index_wiki(wiki, wiki_page_id, data_dir, image_urls=image_urls)
-
-                    chat_url = os.getenv("CHAT_SERVER_URL", "").rstrip("/")
-                    if chat_url:
-                        embed_url = f"{chat_url}/chat/{wiki_page_id}"
-                        await session.append_embed_block(wiki_page_id, embed_url)
-                        logger.info("Webhook: chat widget embedded at %s", embed_url)
+                    logger.info("Webhook: embeddings indexed for %s", hire.name)
                 except Exception:
                     logger.exception(
-                        "Webhook: embedding/chat setup failed for %s", hire.name
+                        "Webhook: embedding failed for %s", hire.name
                     )
+
+            # Notify the new hire (after indexing so the Slack bot can answer immediately)
+            from ..notify import notify_hire
+            notify_hire(hire, wiki_url, wiki_page_id=wiki_page_id)
 
     except Exception:
         logger.exception("Webhook: unexpected error processing page %s", page_id)

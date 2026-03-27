@@ -48,7 +48,7 @@ class GithubFetcher:
         import datetime
         core = self._gh.get_rate_limit().resources.core
         if core.remaining < 10:
-            reset_in = (core.reset.replace(tzinfo=None) - datetime.datetime.utcnow()).total_seconds()
+            reset_in = (core.reset.replace(tzinfo=datetime.timezone.utc) - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
             wait = max(reset_in + 2, 0)
             logger.warning("GitHub rate limit nearly exhausted (%d remaining). Waiting %.0fs.", core.remaining, wait)
             time.sleep(wait)

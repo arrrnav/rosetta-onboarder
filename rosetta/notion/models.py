@@ -40,7 +40,9 @@ class OnboardingInput:
     role: str
     repo_urls: list[str]
     notes: str
-    db_row_id: str  # Notion page ID of the DB row — used to write Status + wiki URL back
+    db_row_id: str       # Notion page ID of the DB row — used to write Status + wiki URL back
+    contact_email: str = ""   # Optional — used to send email notification after wiki creation
+    slack_handle: str = ""    # Optional — used to send Slack DM after wiki creation
 
     @classmethod
     def empty(cls, db_row_id: str) -> "OnboardingInput":
