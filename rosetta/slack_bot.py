@@ -41,13 +41,12 @@ and suggest where the engineer might find more information (e.g. README,
 docs, or asking a teammate).
 
 Format responses using Markdown with these rules:
-- **Bold** for emphasis and section labels (instead of headers — # and ## are not supported)
+- **Bold** for emphasis and section labels instead of headers — # and ## are not supported
 - Numbered lists for sequential steps, bullet lists for non-ordered items
 - `inline code` for commands, file names, and identifiers
 - Fenced code blocks for multi-line code or terminal output
 - > blockquotes for important notes
-- Italic and ~~strikethrough~~ are supported
-- Do NOT use # or ## headings — use **bold labels** instead\
+- Italic and ~~strikethrough~~ are supported\
 """
 
 

@@ -42,30 +42,30 @@ EMBED_MODEL = "models/gemini-embedding-2-preview"
 # ---------------------------------------------------------------------------
 
 def _configure_genai():
-    """Configure and return the google.generativeai module."""
-    import google.generativeai as genai  # lazy import — not everyone runs the server
+    """Create and return a google.genai Client."""
+    from google import genai  # lazy import — not everyone runs the server
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
             "GEMINI_API_KEY is not set. Add it to your secrets .env file."
         )
-    genai.configure(api_key=api_key)
-    return genai
+    return genai.Client(api_key=api_key)
 
 
-def _embed_text(genai, text: str, task_type: str) -> list[float]:
-    result = genai.embed_content(
+def _embed_text(client, text: str, task_type: str) -> list[float]:
+    from google.genai import types
+    result = client.models.embed_content(
         model=EMBED_MODEL,
-        content=text,
-        task_type=task_type,
+        contents=text,
+        config=types.EmbedContentConfig(task_type=task_type),
     )
-    return result["embedding"]
+    return result.embeddings[0].values
 
 
-def _embed_image(genai, url: str) -> list[float] | None:
+def _embed_image(client, url: str) -> list[float] | None:
     """Fetch a remote image and embed it. Returns None on any failure."""
     try:
-        from PIL import Image
+        from google.genai import types
 
         req = urllib.request.Request(
             url,
@@ -73,13 +73,20 @@ def _embed_image(genai, url: str) -> list[float] | None:
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = resp.read()
-        img = Image.open(BytesIO(data)).convert("RGB")
-        result = genai.embed_content(
+        # Detect mime type from response headers or URL
+        mime_type = "image/jpeg"
+        if url.lower().endswith(".png"):
+            mime_type = "image/png"
+        elif url.lower().endswith(".gif"):
+            mime_type = "image/gif"
+        elif url.lower().endswith(".webp"):
+            mime_type = "image/webp"
+        result = client.models.embed_content(
             model=EMBED_MODEL,
-            content=img,
-            task_type="RETRIEVAL_DOCUMENT",
+            contents=types.Part.from_bytes(data=data, mime_type=mime_type),
+            config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
         )
-        return result["embedding"]
+        return result.embeddings[0].values
     except Exception as exc:
         logger.warning("Skipping image embed for %s — %s", url, exc)
         return None
@@ -122,7 +129,7 @@ class VectorStore:
             image_urls: Optional list of image URLs from README files.
                         Each is fetched and embedded; failures are skipped.
         """
-        genai = _configure_genai()
+        client = _configure_genai()
         chunks: list[str] = []
         vecs: list[list[float]] = []
 
@@ -130,12 +137,12 @@ class VectorStore:
         for section in wiki.sections:
             chunk = f"## {section.heading}\n\n{section.content}"
             chunks.append(chunk)
-            vecs.append(_embed_text(genai, chunk, "RETRIEVAL_DOCUMENT"))
+            vecs.append(_embed_text(client, chunk, "RETRIEVAL_DOCUMENT"))
             logger.debug("Embedded section '%s'", section.heading)
 
         # Image chunks — best-effort, never fatal
         for url in (image_urls or []):
-            vec = _embed_image(genai, url)
+            vec = _embed_image(client, url)
             if vec is not None:
                 chunks.append(f"[Image from README: {url}]")
                 vecs.append(vec)
@@ -167,9 +174,9 @@ class VectorStore:
         """
         if len(self.chunks) == 0:
             return []
-        genai = _configure_genai()
+        client = _configure_genai()
         q_vec = np.array(
-            _embed_text(genai, query, "RETRIEVAL_QUERY"),
+            _embed_text(client, query, "RETRIEVAL_QUERY"),
             dtype=np.float32,
         )
         norms = np.linalg.norm(self.embeddings, axis=1)
