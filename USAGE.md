@@ -8,7 +8,7 @@ Setup, configuration, and day-to-day usage for Rosetta Onboarder.
 
 - Python 3.13+
 - Node.js (for `notion-mcp-server`)
-- [ngrok](https://ngrok.com/download) (for the Notion webhook endpoint — not needed for chat)
+- [ngrok](https://ngrok.com/download) (optional — only needed for Notion webhook auto-trigger)
 - A Notion account and a Slack workspace
 
 ---
@@ -24,25 +24,20 @@ npm install -g notion-mcp-server
 
 ## Configuration
 
-Two `.env` files are used. Secrets live outside the repo to keep them out of version control.
+Run `rosetta setup` for an interactive wizard that configures everything below.
 
-**`.env`** (secret keys — lives outside the repo)
+**`.env`** (project root)
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 NOTION_TOKEN=ntn_...
-GITHUB_TOKEN=github_pat_...
-GEMINI_API_KEY=AIza...
-NOTION_WEBHOOK_SECRET=<verification token from webhook setup>
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
-```
-
-**`.env`** (project config — lives in the repo root)
-```
 NOTION_ONBOARDING_PAGE_ID=...
 NOTION_DATABASE_ID=...
-CHAT_SERVER_URL=https://<ngrok-url>   # only needed for webhook auto-trigger
-CHAT_DATA_DIR=data
+GITHUB_TOKEN=github_pat_...
+GEMINI_API_KEY=AIza...
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+NOTION_WEBHOOK_SECRET=<verification token from webhook setup>
+WEBHOOK_PUBLIC_URL=https://<ngrok-url>   # only needed for webhook auto-trigger
 CLAUDE_MODEL=claude-haiku-4-5-20251001
 GITHUB_MAX_ISSUES=3
 GITHUB_MAX_PRS=2
@@ -55,15 +50,14 @@ GITHUB_TREE_DEPTH=1
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
 | `NOTION_TOKEN` | Yes | Notion internal integration token (`ntn_...`) |
+| `NOTION_ONBOARDING_PAGE_ID` | Yes | Page ID of the top-level onboarding hub page |
+| `NOTION_DATABASE_ID` | Yes | Page ID of the New Hire Requests database |
 | `GITHUB_TOKEN` | Recommended | GitHub PAT — needed for private repos, raises rate limit from 60 to 5000 req/hr |
-| `GEMINI_API_KEY` | Yes (for chat) | Google AI Studio key — free tier is sufficient |
-| `NOTION_WEBHOOK_SECRET` | Yes (for auto-trigger) | Verification token captured during webhook setup |
-| `SLACK_BOT_TOKEN` | Yes (for notifications + chat) | Slack bot OAuth token (`xoxb-...`) |
-| `SLACK_APP_TOKEN` | Yes (for in-DM chat) | Slack app-level token (`xapp-...`) with `connections:write` — enables Socket Mode bot in `rosetta serve` |
-| `NOTION_ONBOARDING_PAGE_ID` | Yes | Page ID of the top-level "Engineering Onboarding" page |
-| `NOTION_DATABASE_ID` | Yes | Page ID of the "New Hire Requests" database |
-| `CHAT_SERVER_URL` | Yes (for auto-trigger) | Public ngrok URL pointing to this server — only needed for the Notion webhook endpoint |
-| `CHAT_DATA_DIR` | No | Directory for vector store pickles (default: `data`) |
+| `GEMINI_API_KEY` | Yes (for Slack chat) | Google AI Studio key — powers RAG for the Slack bot |
+| `SLACK_BOT_TOKEN` | Yes (for Slack) | Slack bot OAuth token (`xoxb-...`) |
+| `SLACK_APP_TOKEN` | Yes (for Slack chat) | Slack app-level token (`xapp-...`) with `connections:write` — enables Socket Mode |
+| `NOTION_WEBHOOK_SECRET` | No | Verification token from webhook setup — enables instant auto-trigger |
+| `WEBHOOK_PUBLIC_URL` | No | Public ngrok URL — only needed alongside `NOTION_WEBHOOK_SECRET` for webhook auto-trigger |
 | `CLAUDE_MODEL` | No | Claude model to use (default: `claude-haiku-4-5-20251001`) |
 | `GITHUB_MAX_ISSUES` | No | Max issues to fetch per repo (default: `3`) |
 | `GITHUB_MAX_PRS` | No | Max PRs to fetch per repo (default: `2`) |
@@ -77,7 +71,9 @@ GITHUB_TREE_DEPTH=1
 
 Duplicate the [public page link](https://www.notion.so/Engineering-Onboarding-32ef78cab142810d8353ca62c3a9e6ae?source=copy_link). End goal is for this to be a publicly available template on the Marketplace.
 
-Alternatively, in Notion manually create a top-level page called **Engineering Onboarding**. Inside it, create a database called **New Hire Requests** with the following schema:
+Alternatively, run `rosetta setup` — it will create the New Hire Requests database and Wiki Archive page inside a page you create and share with your integration.
+
+Or manually create a top-level page and inside it a database called **New Hire Requests** with the following schema:
 
 | Property | Type | Purpose |
 |---|---|---|
@@ -96,7 +92,7 @@ Alternatively, in Notion manually create a top-level page called **Engineering O
 
 **2. Grant the integration content access**
 
-Go to [notion.so/profile/integrations](https://notion.so/profile/integrations) → your integration → **Content access** tab. Add the **Engineering Onboarding** page. The database inside it is automatically included.
+Go to [notion.so/profile/integrations](https://notion.so/profile/integrations) → your integration → **Content access** tab. Add the onboarding hub page. The database inside it is automatically included.
 
 ![Integration setup — Content access tab](docs/img/integration_setup.png)
 
@@ -104,7 +100,7 @@ Go to [notion.so/profile/integrations](https://notion.so/profile/integrations) �
 
 **3. Set the page to public**
 
-On the Engineering Onboarding page: **Share → Share to web → Anyone with the link can view**.
+On the onboarding hub page: **Share → Share to web → Anyone with the link can view**.
 
 Child wiki pages inherit this setting — do it once and all generated wikis will be publicly accessible without a Notion account.
 
@@ -112,7 +108,7 @@ Child wiki pages inherit this setting — do it once and all generated wikis wil
 
 **4. Copy the page IDs**
 
-The page ID is the UUID at the end of the Notion URL. Set `NOTION_ONBOARDING_PAGE_ID` and `NOTION_DATABASE_ID` in your `.env`.
+The page ID is the UUID at the end of the Notion URL. Set `NOTION_ONBOARDING_PAGE_ID` and `NOTION_DATABASE_ID` in your `.env` (or run `rosetta setup`).
 
 ---
 
@@ -150,55 +146,73 @@ In the app settings: **OAuth & Permissions** → **Bot Token Scopes**. Add:
 
 ---
 
-## Webhook setup (one-time)
+## Webhook setup (optional — enables instant auto-trigger)
 
-The webhook lets Rosetta auto-trigger when a DB row is set to Ready. Requires `rosetta serve` and ngrok to be running.
+Without a webhook, `rosetta serve` polls the New Hire Requests database every 5 minutes for rows with `Status = Ready`. The webhook makes it instant. Both require `rosetta serve` to be running.
 
-1. Start ngrok: `ngrok http 8000` — copy the `https://` URL into `CHAT_SERVER_URL` in `.env`
-2. Start the server: `rosetta serve`
-3. Go to [notion.so/profile/integrations](https://notion.so/profile/integrations) → your integration → **Webhooks**
-4. Add webhook URL: `{CHAT_SERVER_URL}/webhook/notion`
-5. Subscribe to `page.properties_updated` only — uncheck all other events
+**1. Start a public tunnel**
 
-![Webhook setup — subscribing to page.properties_updated](docs/img/webhook_setup.png)
+```bash
+ngrok http 8000
+```
 
-6. Click **Create subscription** — Notion immediately POSTs a `verification_token` to your endpoint
-7. Copy the token from the `rosetta serve` terminal logs (look for `NOTION WEBHOOK VERIFICATION TOKEN: ...`)
-8. Paste it into the Notion verification form and submit
-9. Set `NOTION_WEBHOOK_SECRET=<that token>` in your secrets `.env` and restart `rosetta serve`
+Copy the `https://` Forwarding URL. Run `rosetta setup` (webhook step) or set `WEBHOOK_PUBLIC_URL` in `.env` directly.
+
+**Note:** ngrok free tier assigns a new URL each session. When you restart ngrok, update `WEBHOOK_PUBLIC_URL` in `.env` and the webhook URL in the Notion dashboard, then restart `rosetta serve`.
+
+**2. Register the webhook in Notion**
+
+Go to [notion.so/profile/integrations](https://notion.so/profile/integrations) → your integration → **Webhooks** → **Add webhook**.
+
+- URL: `{WEBHOOK_PUBLIC_URL}/webhook/notion`
+- Event: `page.properties_updated` only
+
+Click **Create subscription** — Notion immediately POSTs a verification token to the endpoint.
+
+**3. Capture the verification token**
+
+Copy the token from the `rosetta serve` terminal logs (look for `NOTION WEBHOOK VERIFICATION TOKEN: ...`). Paste it into the Notion verification form and submit. Set `NOTION_WEBHOOK_SECRET=<that token>` in `.env` and restart `rosetta serve`.
 
 The verification token is also the HMAC-SHA256 signing key used to authenticate all future webhook payloads.
-
-**Note:** ngrok free tier assigns a new URL each session. When you restart ngrok, update `CHAT_SERVER_URL` in `.env` and the webhook URL in the Notion dashboard, then restart `rosetta serve`.
 
 ---
 
 ## Running
 
-**Every session (with webhook auto-trigger):**
+**Standard session:**
+
+```bash
+rosetta serve
+```
+
+`rosetta serve` starts in one process: the uvicorn HTTP server (webhook listener), and the Slack Socket Mode bot (if `SLACK_APP_TOKEN` is set). The Slack bot connects outbound to Slack — no public URL needed for it.
+
+**With webhook auto-trigger (optional):**
 
 ```bash
 # Terminal 1 — public tunnel for the Notion webhook endpoint
 ngrok http 8000
-# Update CHAT_SERVER_URL in .env with the new ngrok URL
+# Update WEBHOOK_PUBLIC_URL in .env with the new ngrok URL
 
-# Terminal 2 — chat server + webhook listener + Slack bot
+# Terminal 2
 rosetta serve
 ```
 
-`rosetta serve` starts three things in one process: the uvicorn HTTP server, the Notion webhook listener, and the Slack Socket Mode bot (if `SLACK_APP_TOKEN` is set). The Slack bot connects outbound to Slack — no ngrok needed for it.
+**Adding a new hire:**
 
-**Manual onboard (no ngrok needed):**
+```bash
+rosetta onboard
+```
+
+Prompts for name, role, GitHub repos, and contact details, then creates a `Ready` row in the database. `rosetta serve` picks it up automatically (instantly via webhook, or within 5 minutes via polling).
+
+**Manual trigger (re-processing or debugging):**
 
 ```bash
 rosetta onboard <notion-page-id>
 ```
 
-The page ID is the UUID at the end of the DB row's Notion URL. Runs the full flow — wiki generation, embeddings, Slack DM — without needing a running server or public URL.
-
-**Automatic onboard (webhook-triggered):**
-
-Set a DB row's Status to `Ready`. Rosetta picks it up via the Notion webhook and generates the wiki automatically. The row status updates to `Processing` then `Done`, with the Wiki URL written back.
+The page ID is the UUID at the end of the DB row's Notion URL.
 
 ---
 

@@ -28,7 +28,7 @@ Name it (e.g. "Rosetta") and select your workspace.
 ## 3. Install to workspace
 
 **OAuth & Permissions** → **Install to Workspace**.
-Copy the **Bot User OAuth Token** (`xoxb-...`) into `SLACK_BOT_TOKEN` in your `.env`.
+Take note of the **Bot User OAuth Token** (`xoxb-...`).
 
 ---
 
@@ -37,7 +37,7 @@ Copy the **Bot User OAuth Token** (`xoxb-...`) into `SLACK_BOT_TOKEN` in your `.
 **Settings** → **Socket Mode** → toggle on.
 
 Then **Basic Information** → **App-Level Tokens** → **Generate Token and Scopes**.
-Name it (e.g. `rosetta-socket`), add the `connections:write` scope, generate, and copy the token (`xapp-...`) into `SLACK_APP_TOKEN`.
+Name it (e.g. `rosetta-socket`), add the `connections:write` scope, generate, and take note of the token (`xapp-...`).
 
 ---
 
@@ -57,24 +57,14 @@ Reinstall the app when prompted.
 
 ---
 
-## 7. Set env vars
+## 7. Note env vars
 
-Paste both tokens into your secrets `.env`:
+Remember to take note of both tokens for Rosetta setup:
 
 ```
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
+Bot User OAuth Token = xoxb-...
+App Token = xapp-...
 ```
-
----
-
-## 8. Test
-
-```bash
-rosetta serve
-```
-
-Look for `Slack bot connected.` in the logs. Open a DM with the bot — you should see a message input box. Send a message; if a wiki has been generated for your Slack user, the bot will answer using RAG context.
 
 ---
 
