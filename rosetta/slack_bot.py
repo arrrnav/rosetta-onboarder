@@ -165,6 +165,13 @@ async def start_bot(data_dir: Path) -> None:
             )
             return
 
+        # Post placeholder while processing
+        placeholder = await web_client.chat_postMessage(
+            channel=channel,
+            text="_Rosetta is thinking..._",
+        )
+        placeholder_ts = placeholder["ts"]
+
         try:
             from .embeddings import VectorStore
             store = VectorStore.load(pkl_path)
@@ -172,8 +179,9 @@ async def start_bot(data_dir: Path) -> None:
             context = "\n\n---\n\n".join(chunks)
         except Exception:
             logger.exception("RAG retrieval failed for user %s", user_id)
-            await web_client.chat_postMessage(
+            await web_client.chat_update(
                 channel=channel,
+                ts=placeholder_ts,
                 text="Sorry, I ran into an error retrieving context. Please try again.",
             )
             return
@@ -199,13 +207,18 @@ async def start_bot(data_dir: Path) -> None:
             answer = response.content[0].text
         except Exception:
             logger.exception("Claude response failed for user %s", user_id)
-            await web_client.chat_postMessage(
+            await web_client.chat_update(
                 channel=channel,
+                ts=placeholder_ts,
                 text="Sorry, I couldn't generate a response right now. Please try again.",
             )
             return
 
-        await web_client.chat_postMessage(channel=channel, text=_md_to_mrkdwn(answer))
+        await web_client.chat_update(
+            channel=channel,
+            ts=placeholder_ts,
+            text=_md_to_mrkdwn(answer),
+        )
         logger.info("Slack bot answered question for user %s (wiki %s)", user_id, wiki_page_id)
 
     socket_client = SocketModeClient(app_token=app_token, web_client=web_client)
