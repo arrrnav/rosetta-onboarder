@@ -336,6 +336,8 @@ class NotionMCPSession:
         role: str,
         repo_urls: list[str],
         notes: str = "",
+        contact_email: str = "",
+        slack_handle: str = "",
     ) -> str:
         """
         Create a new row in the New Hire Requests database with Status=Ready.
@@ -343,27 +345,33 @@ class NotionMCPSession:
         Returns the new page ID so the caller can show a confirmation URL.
         """
         repos_text = "\n".join(repo_urls)
+        properties: dict = {
+            "Name": {
+                "title": [{"text": {"content": name}}]
+            },
+            "Role": {
+                "rich_text": [{"text": {"content": role}}]
+            },
+            "GitHub Repos": {
+                "rich_text": [{"text": {"content": repos_text}}]
+            },
+            "Notes": {
+                "rich_text": [{"text": {"content": notes}}]
+            },
+            "Status": {
+                "select": {"name": "Ready"}
+            },
+        }
+        if contact_email:
+            properties["Contact Email"] = {"email": contact_email}
+        if slack_handle:
+            properties["Slack Handle"] = {"rich_text": [{"text": {"content": slack_handle}}]}
+
         result = await self._session.call_tool(
             "API-post-page",
             {
                 "parent": {"database_id": database_id},
-                "properties": {
-                    "Name": {
-                        "title": [{"text": {"content": name}}]
-                    },
-                    "Role": {
-                        "rich_text": [{"text": {"content": role}}]
-                    },
-                    "GitHub Repos": {
-                        "rich_text": [{"text": {"content": repos_text}}]
-                    },
-                    "Notes": {
-                        "rich_text": [{"text": {"content": notes}}]
-                    },
-                    "Status": {
-                        "select": {"name": "Ready"}
-                    },
-                },
+                "properties": properties,
             },
         )
         data = _extract_json(result)

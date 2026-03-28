@@ -141,7 +141,7 @@ def _update_slack_wiki_map(user_id: str, wiki_page_id: str) -> None:
     """Write user_id → wiki_page_id to data/slack_wiki_map.json."""
     import json as _json
     from pathlib import Path as _Path
-    data_dir = _Path(os.getenv("CHAT_DATA_DIR", "data"))
+    data_dir = _Path("data")
     data_dir.mkdir(parents=True, exist_ok=True)
     map_path = data_dir / "slack_wiki_map.json"
     mapping: dict = {}

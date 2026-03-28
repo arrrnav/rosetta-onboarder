@@ -11,7 +11,7 @@ Routes:
     POST /chat/{wiki_id}       — {"question": str} → {"answer": str}
     POST /webhook/notion       — Notion webhook receiver (page.properties_updated)
 
-The server loads VectorStore pickles from CHAT_DATA_DIR (default: ./data).
+The server loads VectorStore pickles from ./data.
 Stores are cached in memory after the first load per wiki_id.
 
 Webhook flow (M3):
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 async def _lifespan(app: FastAPI):
     """Start background tasks (Slack bot, scheduler) alongside uvicorn."""
     tasks: list[asyncio.Task] = []
-    data_dir = Path(os.getenv("CHAT_DATA_DIR", "data"))
+    data_dir = Path("data")
 
     app_token = os.getenv("SLACK_APP_TOKEN", "")
     if app_token:
@@ -105,7 +105,7 @@ or asking a teammate).\
 # ---------------------------------------------------------------------------
 
 def _data_dir() -> Path:
-    return Path(os.getenv("CHAT_DATA_DIR", "data"))
+    return Path("data")
 
 
 def _get_store(wiki_id: str) -> VectorStore:
@@ -217,10 +217,24 @@ async def notion_webhook(request: Request, background_tasks: BackgroundTasks):
     # This request has no signature — handle it first, before the HMAC check.
     verification_token = payload.get("verification_token")
     if verification_token:
-        logger.info("=" * 60)
-        logger.info("NOTION WEBHOOK VERIFICATION TOKEN: %s", verification_token)
-        logger.info("Copy this token → Notion dashboard → Webhooks → Verify → paste it.")
-        logger.info("=" * 60)
+        # Always print — this is visible regardless of VERBOSE_LOGGING
+        print(f"\n{'=' * 60}")
+        print(f"  Notion webhook verification token received:")
+        print(f"  {verification_token}")
+        print(f"  Paste this into the Notion dashboard to activate the webhook.")
+        print(f"{'=' * 60}\n", flush=True)
+
+        # Auto-write to .env and activate immediately — no restart needed
+        try:
+            from dotenv import find_dotenv, set_key
+            env_path = find_dotenv(usecwd=True) or ".env"
+            set_key(env_path, "NOTION_WEBHOOK_SECRET", verification_token)
+            os.environ["NOTION_WEBHOOK_SECRET"] = verification_token
+            print("  NOTION_WEBHOOK_SECRET written to .env and active.\n", flush=True)
+        except Exception as exc:
+            print(f"  Could not auto-write to .env: {exc}", flush=True)
+            print(f"  Add manually: NOTION_WEBHOOK_SECRET={verification_token}\n", flush=True)
+
         return {"ok": True}
 
     # Verify HMAC-SHA256 signature for all non-verification requests
@@ -318,7 +332,7 @@ async def _handle_hire_if_ready(page_id: str) -> None:
                             image_urls.extend(fetcher.get_image_urls_from_readme(repo_url))
                         except Exception:
                             pass
-                    data_dir = Path(os.getenv("CHAT_DATA_DIR", "data"))
+                    data_dir = Path("data")
                     index_wiki(wiki, wiki_page_id, data_dir, image_urls=image_urls)
                     logger.info("Webhook: embeddings indexed for %s", hire.name)
                 except Exception:

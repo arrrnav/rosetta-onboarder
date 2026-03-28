@@ -143,6 +143,13 @@ def _check_smtp() -> _Result:
     return _Result("SMTP email", False, "SMTP_HOST or SMTP_USER missing")
 
 
+def _check_webhook() -> _Result:
+    secret = os.environ.get("NOTION_WEBHOOK_SECRET", "")
+    if secret:
+        return _Result("Notion webhook", True, "secret set — instant auto-trigger enabled")
+    return _Result("Notion webhook", None, "not configured (optional — falls back to 5-min poll)")
+
+
 def _check_refresh() -> _Result:
     enabled = os.environ.get("REFRESH_ENABLED", "false").lower() == "true"
     tz = os.environ.get("REFRESH_TIMEZONE", "UTC")
@@ -202,6 +209,7 @@ def run() -> None:
     else:
         results.append(_Result("NOTION_DATABASE_ID", False, "not set"))
 
+    results.append(_check_webhook())
     results.append(_check_anthropic_key(anthropic_key))
 
     if github_token:

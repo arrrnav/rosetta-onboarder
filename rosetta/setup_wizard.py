@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 import questionary
-from dotenv import dotenv_values, set_key
+from dotenv import dotenv_values, find_dotenv, set_key
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -48,11 +48,12 @@ _KEY_LABELS: dict[str, str] = {
     "SMTP_PORT":                  "SMTP port",
     "SMTP_USER":                  "SMTP user",
     "SMTP_PASSWORD":              "SMTP password",
+    "NOTION_WEBHOOK_SECRET":      "Notion webhook secret",
     "REFRESH_ENABLED":            "Scheduled refresh",
     "REFRESH_TIMEZONE":           "Refresh timezone",
 }
 
-_SECRET_KEYS = {"NOTION_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GEMINI_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SMTP_PASSWORD"}
+_SECRET_KEYS = {"NOTION_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GEMINI_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SMTP_PASSWORD", "NOTION_WEBHOOK_SECRET"}
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +116,11 @@ def _validate_github_token(token: str) -> tuple[bool, str]:
 
 def _provision_notion_workspace(token: str, parent_page_id: str) -> tuple[str, str, str]:
     """
-    Create Engineering Onboarding page, New Hire Requests DB, and Wiki Archive
-    under the given parent page.  Returns (onboarding_id, db_id, graveyard_id).
+    Create New Hire Requests DB and Wiki Archive inside the given page.
+
+    The page the user created and shared IS the onboarding hub
+    (NOTION_ONBOARDING_PAGE_ID) — we don't create another layer on top.
+    Returns (onboarding_id, db_id, graveyard_id) where onboarding_id == parent_page_id.
     """
     headers = {
         "Authorization": f"Bearer {token}",
@@ -124,18 +128,9 @@ def _provision_notion_workspace(token: str, parent_page_id: str) -> tuple[str, s
         "Content-Type": "application/json",
     }
     with httpx.Client(timeout=15) as client:
-        # Engineering Onboarding page
-        resp = client.post(f"{_NOTION_API}/pages", headers=headers, json={
-            "parent": {"type": "page_id", "page_id": parent_page_id},
-            "properties": {"title": [{"text": {"content": "Engineering Onboarding"}}]},
-        })
-        if resp.status_code not in (200, 201):
-            raise RuntimeError(f"Could not create onboarding page: {resp.status_code} {resp.text[:200]}")
-        onboarding_id = resp.json()["id"]
-
-        # New Hire Requests database
+        # New Hire Requests database — direct child of the onboarding hub
         resp = client.post(f"{_NOTION_API}/databases", headers=headers, json={
-            "parent": {"type": "page_id", "page_id": onboarding_id},
+            "parent": {"type": "page_id", "page_id": parent_page_id},
             "title": [{"text": {"content": "New Hire Requests"}}],
             "properties": {
                 "Name":           {"title": {}},
@@ -157,16 +152,22 @@ def _provision_notion_workspace(token: str, parent_page_id: str) -> tuple[str, s
             raise RuntimeError(f"Could not create database: {resp.status_code} {resp.text[:200]}")
         db_id = resp.json()["id"]
 
-        # Wiki Archive page
+        # Wiki Archive page — sibling of the DB, inside the onboarding hub
         resp = client.post(f"{_NOTION_API}/pages", headers=headers, json={
-            "parent": {"type": "page_id", "page_id": onboarding_id},
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "icon": {"type": "external", "external": {"url": "https://www.notion.so/icons/archive_yellow.svg"}},
             "properties": {"title": [{"text": {"content": "Wiki Archive"}}]},
         })
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"Could not create archive page: {resp.status_code} {resp.text[:200]}")
         graveyard_id = resp.json()["id"]
 
-    return onboarding_id, db_id, graveyard_id
+        # Divider on the parent page, after the Wiki Archive
+        client.patch(f"{_NOTION_API}/blocks/{parent_page_id}/children", headers=headers, json={
+            "children": [{"object": "block", "type": "divider", "divider": {}}]
+        })
+
+    return parent_page_id, db_id, graveyard_id
 
 
 # ---------------------------------------------------------------------------
@@ -212,13 +213,14 @@ def _ask_notion_workspace(collected: dict) -> None:
 
     if choice == "create":
         console.print(
-            "\n  [dim]1. Create a blank page in Notion (e.g. 'Rosetta')\n"
+            "\n  [dim]1. Create a page in Notion with whatever name you like\n"
+            "     (e.g. 'Engineering Onboarding') — this will be your onboarding hub\n"
             "  2. Open it → click [bold]...[/bold] → [bold]Connect to[/bold] → select your integration\n"
             "  3. Paste its URL or ID below[/dim]"
         )
         while True:
             raw = questionary.text(
-                "Parent page URL or ID",
+                "Onboarding hub page URL or ID",
                 style=_STYLE,
             ).ask()
             if raw is None:
@@ -259,7 +261,7 @@ def _ask_notion_workspace(collected: dict) -> None:
                         return
                 continue  # loop back to URL prompt
 
-            console.print(f"  [green]✔[/green]  Engineering Onboarding  [dim]{onboarding_id}[/dim]")
+            console.print(f"  [green]✔[/green]  Onboarding hub          [dim](your page)[/dim]")
             console.print(f"  [green]✔[/green]  New Hire Requests DB    [dim]{db_id}[/dim]")
             console.print(f"  [green]✔[/green]  Wiki Archive            [dim]{graveyard_id}[/dim]")
             collected["NOTION_ONBOARDING_PAGE_ID"] = onboarding_id
@@ -270,21 +272,42 @@ def _ask_notion_workspace(collected: dict) -> None:
     else:
         _ask_notion_ids_manually(collected)
 
-    # Public sharing reminder — required for chat widget + new hire access
+    # Public sharing reminder — new hires receive a Notion link via Slack/email
     console.print(
-        "\n  [bold yellow]Make the Engineering Onboarding page public:[/bold yellow]\n"
-        "  [dim]1. Open Engineering Onboarding in Notion\n"
-        "  2. Click Share (top right) → Share to web\n"
-        "  3. Set to 'Anyone with the link can view'\n"
-        "  Required so new hires can open their wikis and use the chat widget.[/dim]"
+        "\n  [dim]New hires receive a link to their wiki via Slack or email.\n"
+        "  If they don't have a Notion account they won't be able to open it\n"
+        "  unless the onboarding hub is publicly accessible.[/dim]"
     )
-    confirmed = questionary.confirm(
-        "I've made it public",
-        default=True,
+    make_public = questionary.select(
+        "Who will be accessing the wikis?",
+        choices=[
+            questionary.Choice(
+                "New hires without Notion accounts — make the hub public",
+                value="public",
+            ),
+            questionary.Choice(
+                "New hires are already Notion workspace members — keep it private",
+                value="private",
+            ),
+        ],
         style=_STYLE,
     ).ask()
-    if confirmed is None:
+    if make_public is None:
         _cancelled()
+
+    if make_public == "public":
+        console.print(
+            "\n  [dim]1. Open your onboarding hub page in Notion\n"
+            "  2. Click Share (top right) → Share to web\n"
+            "  3. Set to 'Anyone with the link can view'[/dim]"
+        )
+        confirmed = questionary.confirm(
+            "I've made it public",
+            default=True,
+            style=_STYLE,
+        ).ask()
+        if confirmed is None:
+            _cancelled()
 
 
 def _ask_notion_ids_manually(collected: dict) -> None:
@@ -426,53 +449,178 @@ def _ask_slack(collected: dict) -> None:
     if bot.strip():
         collected["SLACK_BOT_TOKEN"] = bot.strip()
 
-    app_tok = questionary.text(
-        "Slack app-level token  (xapp-… optional, for socket mode — leave blank to skip)",
-        style=_STYLE,
-    ).ask()
+    gemini_configured = bool(collected.get("GEMINI_API_KEY"))
+    if gemini_configured:
+        console.print(
+            "\n  [bold yellow]App-level token required:[/bold yellow]\n"
+            "  [dim]Gemini is configured for wiki Q&A, but the bot can't receive\n"
+            "  messages without socket mode. New hires won't be able to ask questions\n"
+            "  unless you provide this token.\n"
+            "  Get one at api.slack.com/apps → your app → Basic Information → App-Level Tokens.[/dim]"
+        )
+        app_tok_prompt = "Slack app-level token  (xapp-…)"
+    else:
+        console.print(
+            "\n  [dim]An app-level token (xapp-…) enables the bot to receive messages.\n"
+            "  Without it, Rosetta can only send notifications (wiki ready, refresh alerts).\n"
+            "  Get one at api.slack.com/apps → your app → Basic Information → App-Level Tokens.[/dim]"
+        )
+        app_tok_prompt = "Slack app-level token  (xapp-… leave blank to skip)"
+
+    app_tok = questionary.password(app_tok_prompt, style=_STYLE).ask()
     if app_tok is None:
         _cancelled()
     if app_tok.strip():
         collected["SLACK_APP_TOKEN"] = app_tok.strip()
+    elif gemini_configured:
+        console.print(
+            "  [yellow]Warning:[/yellow] Gemini is set up but the app-level token was skipped —\n"
+            "  new hires won't be able to DM the bot to ask wiki questions."
+        )
+
+
+_SMTP_PROVIDERS = {
+    "gmail":    ("smtp.gmail.com",        "587"),
+    "outlook":  ("smtp-mail.outlook.com", "587"),
+    "sendgrid": ("smtp.sendgrid.net",     "587"),
+    "other":    ("",                      "587"),
+}
+
+_SMTP_PROVIDER_NOTES = {
+    "gmail": (
+        "Gmail requires an App Password — your regular password won't work.\n"
+        "  Get one at myaccount.google.com/apppasswords\n"
+        "  (Google Account → Security → 2-Step Verification → App passwords)"
+    ),
+    "outlook": (
+        "Use your full Outlook/Hotmail address as the username\n"
+        "  and your regular account password (or an app password if 2FA is on)."
+    ),
+    "sendgrid": (
+        "SendGrid SMTP: username is literally the word  apikey\n"
+        "  and the password is your SendGrid API key."
+    ),
+    "other": None,
+}
 
 
 def _ask_smtp(collected: dict) -> None:
     """Step 6: SMTP email notifications (optional)."""
     console.print()
-    choice = questionary.select(
+    provider = questionary.select(
         "Set up email notifications?",
         choices=[
-            questionary.Choice("Yes — configure SMTP", value="yes"),
-            questionary.Choice("Skip", value="skip"),
+            questionary.Choice("Gmail",              value="gmail"),
+            questionary.Choice("Outlook / Hotmail",  value="outlook"),
+            questionary.Choice("SendGrid",           value="sendgrid"),
+            questionary.Choice("Other SMTP server",  value="other"),
+            questionary.Choice("Skip",               value="skip"),
+        ],
+        style=_STYLE,
+    ).ask()
+    if provider is None:
+        _cancelled()
+    if provider == "skip":
+        for k in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD"):
+            collected.pop(k, None)
+        return
+
+    host_default, port_default = _SMTP_PROVIDERS[provider]
+    note = _SMTP_PROVIDER_NOTES[provider]
+    if note:
+        console.print(f"\n  [dim]{note}[/dim]")
+
+    host = questionary.text(
+        "SMTP host",
+        default=host_default,
+        style=_STYLE,
+    ).ask()
+    if host is None:
+        _cancelled()
+    collected["SMTP_HOST"] = host.strip() or host_default
+
+    port = questionary.text(
+        "SMTP port",
+        default=port_default,
+        style=_STYLE,
+    ).ask()
+    if port is None:
+        _cancelled()
+    collected["SMTP_PORT"] = port.strip() or port_default
+
+    user_prompt = "SendGrid username  (literally: apikey)" if provider == "sendgrid" else "Your email address"
+    user = questionary.text(user_prompt, style=_STYLE).ask()
+    if user is None:
+        _cancelled()
+    if user.strip():
+        collected["SMTP_USER"] = user.strip()
+
+    pw_prompt = "SendGrid API key" if provider == "sendgrid" else "App password" if provider in ("gmail", "outlook") else "SMTP password"
+    pw = questionary.password(pw_prompt, style=_STYLE).ask()
+    if pw is None:
+        _cancelled()
+    if pw.strip():
+        collected["SMTP_PASSWORD"] = pw.strip()
+
+
+def _ask_webhook(collected: dict) -> None:
+    """Step 3: ngrok + Notion webhook (optional — enables instant auto-trigger)."""
+    console.print()
+    choice = questionary.select(
+        "Set up Notion webhook auto-trigger?",
+        choices=[
+            questionary.Choice("Yes — trigger wiki generation the moment a row is set to Ready", value="yes"),
+            questionary.Choice("Skip — rosetta serve will poll every 5 minutes instead", value="skip"),
         ],
         style=_STYLE,
     ).ask()
     if choice is None:
         _cancelled()
     if choice == "skip":
-        for k in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD"):
-            collected.pop(k, None)
+        collected.pop("NOTION_WEBHOOK_SECRET", None)
         return
 
-    for key, prompt, placeholder in [
-        ("SMTP_HOST",     "SMTP host",            "smtp.gmail.com"),
-        ("SMTP_PORT",     "SMTP port",             "587"),
-        ("SMTP_USER",     "SMTP username",         "you@example.com"),
-    ]:
-        val = questionary.text(
-            f"{prompt}  (e.g. {placeholder})",
-            style=_STYLE,
-        ).ask()
-        if val is None:
-            _cancelled()
-        if val.strip():
-            collected[key] = val.strip()
+    # Step 1: ngrok
+    console.print(
+        "\n  [bold]Step 1 — start a public tunnel with ngrok[/bold]\n"
+        "  [dim]ngrok exposes your local rosetta serve to the internet so Notion\n"
+        "  can POST webhook events to it.\n\n"
+        "  If you don't have ngrok: https://ngrok.com/download\n\n"
+        "  In a separate terminal, run:\n"
+        "    ngrok http 8000\n\n"
+        "  Copy the Forwarding URL — it looks like:\n"
+        "    https://abc123.ngrok-free.app[/dim]"
+    )
+    questionary.press_any_key_to_continue("  Press any key once ngrok is running…", style=_STYLE).ask()
 
-    pw = questionary.password("SMTP password / app password", style=_STYLE).ask()
-    if pw is None:
+    # Step 2: register webhook in Notion + get the secret
+    console.print(
+        "\n  [bold]Step 2 — register the webhook in Notion[/bold]\n"
+        "  [dim]1. Go to notion.so/profile/integrations → select your integration\n"
+        "  2. Click Add webhook\n"
+        "  3. URL: https://<your-ngrok-url>/webhook/notion\n"
+        "  4. Subscribe to the page.properties_updated event\n"
+        "  5. Start rosetta serve in another terminal\n"
+        "  6. Click Create subscription — Notion POSTs a verification token to rosetta serve\n"
+        "  7. Rosetta prints the token and writes it to .env automatically\n"
+        "  8. Paste the token into the Notion verification form[/dim]"
+    )
+
+    console.print(
+        "\n  [dim]Once rosetta serve receives the token it writes NOTION_WEBHOOK_SECRET\n"
+        "  to .env automatically. You can skip this field if that already happened.[/dim]"
+    )
+    secret = questionary.password(
+        "Verification token  (leave blank if rosetta serve already wrote it)",
+        style=_STYLE,
+    ).ask()
+    if secret is None:
         _cancelled()
-    if pw.strip():
-        collected["SMTP_PASSWORD"] = pw.strip()
+    if secret.strip():
+        collected["NOTION_WEBHOOK_SECRET"] = secret.strip()
+        console.print("  [green]✔[/green]  Webhook secret saved")
+    else:
+        console.print("  [dim]Skipped — rosetta serve will have written it automatically.[/dim]")
 
 
 def _ask_refresh(collected: dict) -> None:
@@ -538,7 +686,8 @@ def _print_summary(collected: dict) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def run(env_path: Path) -> None:
+def run() -> None:
+    env_path = Path(find_dotenv(usecwd=True) or ".env")
     # Load existing .env values as defaults
     collected: dict[str, str] = {k: v for k, v in dotenv_values(env_path).items() if v}
 
@@ -553,6 +702,7 @@ def run(env_path: Path) -> None:
     try:
         _ask_notion(collected)
         _ask_notion_workspace(collected)
+        _ask_webhook(collected)
         _ask_anthropic(collected)
         _ask_github(collected)
         _ask_gemini(collected)
