@@ -65,6 +65,38 @@ Tone: warm, direct, and specific. Avoid generic filler. Tailor every section to 
 this person's role and their specific repos.\
 """
 
+_REFRESH_SYSTEM_PROMPT = """\
+You are a technical documentation updater. Your job is to refresh an existing \
+engineering onboarding wiki with current information from GitHub.
+
+You have access to GitHub tools. Use them to fetch up-to-date content for the \
+assigned repositories. Do NOT call fetch_github_contributing — that information \
+is stable and does not need refreshing.
+
+Research strategy (per repo):
+1. Call fetch_github_metadata — check for description or language changes
+2. Call fetch_github_readme — capture significant README updates
+3. Call fetch_github_structure — note any structural changes
+4. Call fetch_github_issues with label="good first issue" — current starter tasks
+5. Call fetch_github_prs — latest pull request activity
+
+When you have gathered current information across all repos, call create_notion_wiki \
+ONCE with all 8 sections. Write factually and concisely. Reflect the current state \
+of the repositories. Do not include a welcome message or first-week guidance.
+
+Wiki sections (include all 8, same order):
+1. Overview — updated repository purposes and current state
+2. Your Repositories — current scope and any notable changes
+3. Codebase Architecture — current organisation; note structural changes
+4. Getting Started — current setup instructions from README
+5. Good First Issues — current open issues tagged for contribution
+6. Team Conventions — current PR process and coding standards
+7. Recent Activity — latest PRs and what they changed
+8. Resources & Links — current links to repos, trackers, and docs
+
+Tone: factual and direct. No filler. No welcome tone.\
+"""
+
 
 def _user_message(hire: OnboardingInput) -> str:
     repos = "\n".join(f"  - {url}" for url in hire.repo_urls)
@@ -80,11 +112,26 @@ def _user_message(hire: OnboardingInput) -> str:
     )
 
 
+def _refresh_user_message(hire: OnboardingInput) -> str:
+    repos = "\n".join(f"  - {url}" for url in hire.repo_urls)
+    return (
+        f"Please refresh the onboarding wiki for:\n\n"
+        f"Name: {hire.name}\n"
+        f"Role: {hire.role}\n"
+        f"Assigned repositories:\n{repos}\n\n"
+        f"Fetch current information from the repositories using the available tools "
+        f"(skip fetch_github_contributing), then call create_notion_wiki to produce "
+        f"the updated wiki."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Agent loop
 # ---------------------------------------------------------------------------
 
-async def run_onboarding_agent(
+async def _run_agent_loop(
+    system_prompt: str,
+    initial_user_message: str,
     hire: OnboardingInput,
     fetcher: GithubFetcher,
     notion_session: NotionMCPSession,
@@ -92,29 +139,8 @@ async def run_onboarding_agent(
     model: str | None = None,
     max_iterations: int = 15,
 ) -> tuple[str, str, WikiPage]:
-    """
-    Run the Claude agentic loop for one new hire.
-
-    Calls tools until ``create_notion_wiki`` is dispatched, then returns the
-    wiki URL, wiki page ID, and the ``WikiPage`` object.
-
-    Args:
-        hire:             Parsed new hire data from the Notion DB row.
-        fetcher:          Initialised GithubFetcher.
-        notion_session:   Active NotionMCPSession (must be used inside ``async with``).
-        parent_page_id:   Notion page ID of the "Engineering Onboarding" parent page.
-        model:            Claude model string. Defaults to CLAUDE_MODEL env var or
-                          ``claude-haiku-4-5-20251001``.
-        max_iterations:   Safety cap on the number of Claude API calls.
-
-    Returns:
-        (wiki_url, wiki_page_id, wiki_page) — the Notion URL, raw page ID, and the
-        WikiPage object (for downstream RAG indexing).
-
-    Raises:
-        RuntimeError: if the agent exhausts max_iterations without writing the wiki.
-    """
-    resolved_model = model or os.getenv("CLAUDE_MODEL")#, "claude-sonnet-4-6")
+    """Shared agent loop — used by both onboarding and refresh agents."""
+    resolved_model = model or os.getenv("CLAUDE_MODEL")
     client = anthropic.AsyncAnthropic()
 
     dispatcher = ToolDispatcher(
@@ -127,7 +153,7 @@ async def run_onboarding_agent(
     )
 
     messages: list[dict[str, Any]] = [
-        {"role": "user", "content": _user_message(hire)},
+        {"role": "user", "content": initial_user_message},
     ]
 
     wiki_url: str = ""
@@ -138,24 +164,20 @@ async def run_onboarding_agent(
         response = await client.messages.create(
             model=resolved_model,
             max_tokens=16000,
-            system=_SYSTEM_PROMPT,
+            system=system_prompt,
             tools=TOOL_DEFINITIONS,
             messages=messages,
         )
 
         logger.debug("stop_reason=%s blocks=%d", response.stop_reason, len(response.content))
-
-        # Append assistant turn — preserves tool_use blocks required for the next turn
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason == "end_turn":
             break
-
         if response.stop_reason != "tool_use":
             logger.warning("Unexpected stop_reason %r — stopping loop", response.stop_reason)
             break
 
-        # Execute every tool_use block in this turn
         tool_results: list[dict[str, Any]] = []
         for block in response.content:
             if block.type != "tool_use":
@@ -172,9 +194,7 @@ async def run_onboarding_agent(
         if tool_results:
             messages.append({"role": "user", "content": tool_results})
 
-        # Exit as soon as the wiki is written — no need for another Claude turn
         if dispatcher.created_wiki is not None:
-            # Extract the URL from the last tool result
             for tr in reversed(tool_results):
                 content = tr.get("content", "")
                 if "URL:" in content:
@@ -190,3 +210,55 @@ async def run_onboarding_agent(
         )
 
     return wiki_url, dispatcher.created_wiki_page_id, dispatcher.created_wiki
+
+
+async def run_onboarding_agent(
+    hire: OnboardingInput,
+    fetcher: GithubFetcher,
+    notion_session: NotionMCPSession,
+    parent_page_id: str,
+    model: str | None = None,
+    max_iterations: int = 15,
+) -> tuple[str, str, WikiPage]:
+    """
+    Run the Claude agentic loop for one new hire.
+
+    Returns (wiki_url, wiki_page_id, wiki_page).
+    Raises RuntimeError if the agent exhausts max_iterations without writing the wiki.
+    """
+    return await _run_agent_loop(
+        system_prompt=_SYSTEM_PROMPT,
+        initial_user_message=_user_message(hire),
+        hire=hire,
+        fetcher=fetcher,
+        notion_session=notion_session,
+        parent_page_id=parent_page_id,
+        model=model,
+        max_iterations=max_iterations,
+    )
+
+
+async def run_refresh_agent(
+    hire: OnboardingInput,
+    fetcher: GithubFetcher,
+    notion_session: NotionMCPSession,
+    parent_page_id: str,
+    model: str | None = None,
+    max_iterations: int = 15,
+) -> tuple[str, str, WikiPage]:
+    """
+    Run the Claude agentic loop to produce a refreshed wiki for an existing hire.
+
+    Uses the refresh system prompt (concise, no welcome tone, skips contributing).
+    Returns (wiki_url, wiki_page_id, wiki_page) — same contract as run_onboarding_agent.
+    """
+    return await _run_agent_loop(
+        system_prompt=_REFRESH_SYSTEM_PROMPT,
+        initial_user_message=_refresh_user_message(hire),
+        hire=hire,
+        fetcher=fetcher,
+        notion_session=notion_session,
+        parent_page_id=parent_page_id,
+        model=model,
+        max_iterations=max_iterations,
+    )

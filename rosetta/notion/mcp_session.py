@@ -73,29 +73,35 @@ class NotionMCPSession:
     # Database operations
     # ------------------------------------------------------------------
 
-    async def query_pending_hires(self, database_id: str) -> list[OnboardingInput]:
+    async def query_pending_hires(self, data_source_id: str) -> list[OnboardingInput]:
         """
         Query the New Hire Requests database for rows where Status = 'Ready'.
 
-        Filters server-side using Notion's select filter so only actionable
-        rows are returned — the polling loop never has to inspect rows that
-        are already Processing or Done.
+        Args:
+            data_source_id: The Notion database ID (NOTION_DATABASE_ID in .env).
 
         Returns a list of fully parsed ``OnboardingInput`` objects. Rows
         whose ``Name`` property is empty are skipped with a warning (they
         are likely template/header rows accidentally set to Ready).
+
+        Note: Uses httpx directly instead of the MCP tool — see query_done_hires.
         """
-        result = await self._session.call_tool(
-            "API-query-data-source",
-            {
-                "data_source_id": database_id,
-                "filter": {
-                    "property": "Status",
-                    "select": {"equals": "Ready"},
-                },
-            },
-        )
-        raw = _extract_json(result)
+        import httpx
+        url = f"https://api.notion.com/v1/databases/{data_source_id}/query"
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "filter": {
+                "property": "Status",
+                "select": {"equals": "Ready"},
+            }
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, headers=headers, json=payload)
+        raw = resp.json()
         hires = []
         for row in raw.get("results", []):
             hire = parse_db_row(row)
@@ -245,35 +251,109 @@ class NotionMCPSession:
             },
         )
 
+    async def query_done_hires(
+        self, data_source_id: str
+    ) -> list[tuple[OnboardingInput, str, str]]:
+        """
+        Query the New Hire Requests database for rows where Status = 'Done'.
+
+        Args:
+            data_source_id: The Notion database ID (NOTION_DATABASE_ID in .env).
+
+        Returns a list of (hire, wiki_url, wiki_page_id) tuples. Rows with an
+        empty Name or empty Wiki URL are skipped — they have no wiki to refresh.
+
+        Note: Uses httpx directly instead of the MCP tool because API-query-data-source
+        consistently returns invalid_request_url regardless of parameter format.
+        """
+        import httpx
+        url = f"https://api.notion.com/v1/databases/{data_source_id}/query"
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "filter": {
+                "property": "Status",
+                "select": {"equals": "Done"},
+            }
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, headers=headers, json=payload)
+        raw = resp.json()
+        hires = []
+        for row in raw.get("results", []):
+            hire = parse_db_row(row)
+            if not hire.name:
+                logger.warning("Skipping DB row %s — no name found", row.get("id"))
+                continue
+            wiki_url = _read_url_prop(row.get("properties", {}), "Wiki URL")
+            if not wiki_url:
+                logger.warning("Skipping %s — no Wiki URL set", hire.name)
+                continue
+            wiki_page_id = _url_to_page_id(wiki_url)
+            if not wiki_page_id:
+                logger.warning("Skipping %s — could not parse wiki page ID from %s", hire.name, wiki_url)
+                continue
+            hires.append((hire, wiki_url, wiki_page_id))
+        return hires
+
+    async def move_page(self, page_id: str, new_parent_page_id: str) -> None:
+        """Reparent a Notion page (used to archive old wikis to the graveyard page).
+
+        Uses the ``notion-move-pages`` MCP tool rather than ``API-patch-page``
+        because the Notion REST PATCH endpoint does not support changing a
+        page's parent — it silently ignores the ``parent`` field.
+        """
+        await self._session.call_tool(
+            "API-move-page",
+            {
+                "page_id": page_id,
+                "parent": {
+                    "type": "page_id",
+                    "page_id": new_parent_page_id,
+                },
+            },
+        )
+        logger.info("Moved page %s → parent %s", page_id, new_parent_page_id)
+
     async def append_updated_section(
         self, page_id: str, section_heading: str, new_content: str
     ) -> None:
-        """Append refreshed content blocks to a page (used by the refresh command)."""
+        """Append refreshed content blocks to a page (used by the refresh command).
+
+        Long content is split into multiple paragraph blocks at line boundaries
+        to stay within Notion's 2000-char-per-block limit without cutting text
+        mid-line.
+        """
+        children: list[dict[str, Any]] = [
+            {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": f"[Refreshed] {section_heading}"}}
+                    ]
+                },
+            },
+        ]
+
+        # Split content into ≤2000-char chunks at line boundaries
+        for chunk in _chunk_at_lines(new_content, 2000):
+            children.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": chunk}}
+                    ]
+                },
+            })
+
         await self._session.call_tool(
             "API-patch-block-children",
-            {
-                "block_id": page_id,
-                "children": [
-                    {
-                        "object": "block",
-                        "type": "heading_2",
-                        "heading_2": {
-                            "rich_text": [
-                                {"type": "text", "text": {"content": f"[Refreshed] {section_heading}"}}
-                            ]
-                        },
-                    },
-                    {
-                        "object": "block",
-                        "type": "paragraph",
-                        "paragraph": {
-                            "rich_text": [
-                                {"type": "text", "text": {"content": new_content[:2000]}}
-                            ]
-                        },
-                    },
-                ],
-            },
+            {"block_id": page_id, "children": children},
         )
 
 
@@ -355,6 +435,63 @@ def _read_rich_text(props: dict[str, Any], key: str) -> str:
 def _read_email(props: dict[str, Any], key: str) -> str:
     """Read a Notion email property and return the address string, or empty string."""
     return props.get(key, {}).get("email") or ""
+
+
+def _read_url_prop(props: dict[str, Any], key: str) -> str:
+    """Read a Notion url property and return the URL string, or empty string."""
+    return props.get(key, {}).get("url") or ""
+
+
+def _url_to_page_id(url: str) -> str:
+    """
+    Extract and reformat a Notion page ID from a Notion URL.
+
+    Notion page URLs end with a 32-char hex string (no hyphens):
+        https://www.notion.so/Title-Of-Page-330f78cab1428192bec1d10cc0c8a578
+    This function extracts that hex string and reformats it as a UUID:
+        330f78ca-b142-8192-bec1-d10cc0c8a578
+    """
+    clean = url.split("?")[0].split("#")[0].rstrip("/")
+    # Already UUID-formatted?
+    uuid_match = re.search(
+        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+        clean.lower(),
+    )
+    if uuid_match:
+        return uuid_match.group(1)
+    # 32-char hex at end of path
+    hex_match = re.search(r"([0-9a-f]{32})$", clean.lower())
+    if hex_match:
+        h = hex_match.group(1)
+        return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+    return ""
+
+
+def _chunk_at_lines(text: str, max_size: int) -> list[str]:
+    """Split *text* into chunks of at most *max_size* chars, breaking at newlines.
+
+    If a single line exceeds *max_size* it is hard-split as a last resort.
+    """
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for line in text.splitlines(keepends=True):
+        if current_len + len(line) > max_size and current:
+            chunks.append("".join(current))
+            current = []
+            current_len = 0
+        # Single line longer than max_size — hard-split
+        while len(line) > max_size:
+            chunks.append(line[:max_size])
+            line = line[max_size:]
+        if line:
+            current.append(line)
+            current_len += len(line)
+
+    if current:
+        chunks.append("".join(current))
+    return chunks or [text]
 
 
 def _extract_github_urls(text: str) -> list[str]:

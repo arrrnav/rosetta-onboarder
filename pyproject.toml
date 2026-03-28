@@ -23,6 +23,7 @@ dependencies = [
     "textual>=1.0.0",
     "slack-sdk>=3.27.0",
     "aiohttp>=3.9.0",
+    "tzdata>=2024.1",
 ]
 
 [project.scripts]

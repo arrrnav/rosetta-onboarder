@@ -43,16 +43,36 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """Start the Slack bot (Socket Mode) alongside uvicorn, if configured."""
-    task: asyncio.Task | None = None
+    """Start background tasks (Slack bot, scheduler) alongside uvicorn."""
+    tasks: list[asyncio.Task] = []
+    data_dir = Path(os.getenv("CHAT_DATA_DIR", "data"))
+
     app_token = os.getenv("SLACK_APP_TOKEN", "")
     if app_token:
         from ..slack_bot import start_bot
-        data_dir = Path(os.getenv("CHAT_DATA_DIR", "data"))
-        task = asyncio.create_task(start_bot(data_dir))
+        tasks.append(asyncio.create_task(start_bot(data_dir)))
         logger.info("Slack bot task created.")
+
+    if os.getenv("REFRESH_ENABLED", "false").lower() == "true":
+        notion_token = os.getenv("NOTION_TOKEN", "")
+        data_source_id = os.getenv("NOTION_DATABASE_ID", "")
+        parent_page_id = os.getenv("NOTION_ONBOARDING_PAGE_ID", "")
+        model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+        if notion_token and data_source_id and parent_page_id:
+            from ..scheduler import start_scheduler
+            tasks.append(asyncio.create_task(
+                start_scheduler(notion_token, data_source_id, parent_page_id, data_dir, model)
+            ))
+            logger.info("Scheduler task created (REFRESH_ENABLED=true).")
+        else:
+            logger.warning(
+                "REFRESH_ENABLED=true but NOTION_TOKEN / NOTION_DATA_SOURCE_ID / "
+                "NOTION_ONBOARDING_PAGE_ID not fully set — scheduler not started."
+            )
+
     yield
-    if task:
+
+    for task in tasks:
         task.cancel()
         try:
             await task
@@ -256,7 +276,7 @@ async def _handle_hire_if_ready(page_id: str) -> None:
             # Guard: only process rows where Status = "Ready"
             status = await session.fetch_page_status(page_id)
             if status != "Ready":
-                logger.debug(
+                logger.info(
                     "Webhook: page %s has Status=%r — skipping", page_id, status
                 )
                 return

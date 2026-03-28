@@ -5,14 +5,19 @@ Install the package with ``pip install -e .`` then run:
 
     rosetta onboard <notion-db-row-id>   — generate wiki for one hire (manual trigger)
     rosetta serve                         — start chat server + Notion webhook listener
+    rosetta refresh [--light]            — manually trigger a wiki refresh for all Done hires
 
 Webhook auto-trigger (Milestone 3):
     Set NOTION_WEBHOOK_SECRET and point your Notion integration's webhook at
     {CHAT_SERVER_URL}/webhook/notion.  When a DB row's Status is set to Ready,
     Notion fires page.properties_updated and rosetta serve processes it automatically.
 
+Scheduled refresh (Milestone 5):
+    Set REFRESH_ENABLED=true. rosetta serve will automatically run a light refresh
+    (issues + PRs) on odd Fridays and a full wiki regeneration on even Fridays at 17:00
+    in REFRESH_TIMEZONE (default UTC).
+
 Future commands:
-    rosetta refresh   — re-fetch issues/PRs for an existing wiki (Milestone 5)
     rosetta setup     — interactive first-time configuration (Future Goals)
 """
 from __future__ import annotations
@@ -172,6 +177,64 @@ async def _run_onboard(
         # -- Milestone 4: notify the new hire --
         from .notify import notify_hire
         notify_hire(hire, wiki_url, wiki_page_id=wiki_page_id)
+
+
+# ---------------------------------------------------------------------------
+# refresh command (Milestone 5)
+# ---------------------------------------------------------------------------
+
+@app.command()
+def refresh(
+    light: bool = typer.Option(
+        False,
+        "--light/--full",
+        help="Light refresh: append updated issues + PRs (default: full refresh).",
+    ),
+) -> None:
+    """
+    Manually trigger a wiki refresh for all Done hires.
+
+    Light refresh: appends updated issues and PRs to existing wiki pages.
+    Full refresh: regenerates wiki pages from scratch and archives old ones.
+
+    This runs the same logic as the automatic Friday scheduler, but on demand.
+    Reads NOTION_TOKEN, NOTION_DATABASE_ID, and NOTION_ONBOARDING_PAGE_ID from .env.
+    """
+    load_dotenv(dotenv_path=Path(__file__).parents[2] / ".env")
+    load_dotenv(dotenv_path=Path(__file__).parents[1] / ".env")
+    _setup_logging(os.getenv("LOG_LEVEL", "INFO"))
+
+    notion_token = _require_env("NOTION_TOKEN")
+    database_id = _require_env("NOTION_DATABASE_ID")
+    parent_page_id = _require_env("NOTION_ONBOARDING_PAGE_ID")
+    github_token = os.environ.get("GITHUB_TOKEN")
+    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+    data_dir = Path(os.getenv("CHAT_DATA_DIR", "data"))
+
+    refresh_type = "light" if light else "full"
+    console.print(f"[bold green]Starting {refresh_type} refresh for all Done hires...[/bold green]")
+
+    asyncio.run(_run_refresh(light, notion_token, database_id, parent_page_id, model, data_dir))
+
+
+async def _run_refresh(
+    is_light: bool,
+    notion_token: str,
+    database_id: str,
+    parent_page_id: str,
+    model: str,
+    data_dir: Path,
+) -> None:
+    """Async implementation of the refresh command."""
+    from .scheduler import _do_refresh
+    await _do_refresh(
+        is_light=is_light,
+        notion_token=notion_token,
+        data_source_id=database_id,
+        parent_page_id=parent_page_id,
+        data_dir=data_dir,
+        model=model,
+    )
 
 
 # ---------------------------------------------------------------------------

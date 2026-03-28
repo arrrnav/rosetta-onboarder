@@ -210,6 +210,50 @@ class VectorStore:
 # Top-level helper used by main.py
 # ---------------------------------------------------------------------------
 
+def append_chunks_to_store(
+    wiki_page_id: str,
+    new_chunks: list[str],
+    data_dir: Path,
+) -> None:
+    """
+    Load an existing VectorStore, embed new_chunks, append them, and save back.
+
+    Used by the light refresh to add updated issues/PR chunks without
+    re-embedding the entire wiki from scratch.
+
+    Raises:
+        FileNotFoundError: if no pkl exists for wiki_page_id (wiki never indexed).
+    """
+    pkl_path = data_dir / f"{wiki_page_id}.pkl"
+    if not pkl_path.exists():
+        raise FileNotFoundError(
+            f"No VectorStore found for wiki {wiki_page_id!r} at {pkl_path}. "
+            "The wiki may not have been indexed yet."
+        )
+    if not new_chunks:
+        logger.info("append_chunks_to_store: no chunks to append for %s", wiki_page_id)
+        return
+
+    store = VectorStore.load(pkl_path)
+    client = _configure_genai()
+    new_vecs: list[list[float]] = []
+    for chunk in new_chunks:
+        new_vecs.append(_embed_text(client, chunk, "RETRIEVAL_DOCUMENT"))
+
+    new_arr = np.array(new_vecs, dtype=np.float32)
+    store.chunks.extend(new_chunks)
+    if store.embeddings.size == 0:
+        # Existing store was empty (e.g. wiki had zero sections)
+        store.embeddings = new_arr
+    else:
+        store.embeddings = np.vstack([store.embeddings, new_arr])
+    store.save(pkl_path)
+    logger.info(
+        "Appended %d chunks to VectorStore for wiki %s (%d total)",
+        len(new_chunks), wiki_page_id, len(store.chunks),
+    )
+
+
 def index_wiki(
     wiki: "WikiPage",
     wiki_page_id: str,

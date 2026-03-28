@@ -97,27 +97,25 @@ def _send_email(hire: OnboardingInput, wiki_url: str) -> None:
 # Slack
 # ---------------------------------------------------------------------------
 
-def _send_slack(hire: OnboardingInput, wiki_url: str, wiki_page_id: str = "") -> None:
+def _slack_client():
+    """Return an initialised WebClient, or None if SLACK_BOT_TOKEN is not set."""
     token = os.getenv("SLACK_BOT_TOKEN", "")
     if not token:
-        logger.warning(
-            "Slack notification skipped for %s — SLACK_BOT_TOKEN not set", hire.name
-        )
-        return
-
+        return None
     try:
         from slack_sdk import WebClient  # type: ignore[import]
-        from slack_sdk.errors import SlackApiError  # type: ignore[import]
+        return WebClient(token=token)
     except ImportError:
         logger.warning(
-            "Slack notification skipped — slack-sdk not installed. "
+            "slack-sdk not installed — Slack notifications unavailable. "
             "Run: pip install slack-sdk"
         )
-        return
+        return None
 
-    client = WebClient(token=token)
 
-    # Resolve username → user ID
+def _resolve_slack_user_id(hire: OnboardingInput, client) -> str | None:
+    """Resolve hire.slack_handle to a Slack user ID. Returns None if not found."""
+    from slack_sdk.errors import SlackApiError  # type: ignore[import]
     try:
         result = client.users_list()
         user_id = next(
@@ -131,13 +129,40 @@ def _send_slack(hire: OnboardingInput, wiki_url: str, wiki_page_id: str = "") ->
         )
     except SlackApiError:
         logger.exception("Slack users_list failed for %s", hire.name)
-        return
-
+        return None
     if not user_id:
         logger.warning(
-            "Slack notification skipped — could not resolve @%s to a user ID",
-            hire.slack_handle,
+            "Could not resolve @%s to a Slack user ID", hire.slack_handle
         )
+    return user_id
+
+
+def _update_slack_wiki_map(user_id: str, wiki_page_id: str) -> None:
+    """Write user_id → wiki_page_id to data/slack_wiki_map.json."""
+    import json as _json
+    from pathlib import Path as _Path
+    data_dir = _Path(os.getenv("CHAT_DATA_DIR", "data"))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    map_path = data_dir / "slack_wiki_map.json"
+    mapping: dict = {}
+    if map_path.exists():
+        try:
+            mapping = _json.loads(map_path.read_text())
+        except Exception:
+            pass
+    mapping[user_id] = wiki_page_id
+    map_path.write_text(_json.dumps(mapping, indent=2))
+    logger.info("Slack wiki mapping saved: %s → %s", user_id, wiki_page_id)
+
+
+def _send_slack(hire: OnboardingInput, wiki_url: str, wiki_page_id: str = "") -> None:
+    client = _slack_client()
+    if not client:
+        logger.warning("Slack notification skipped for %s — SLACK_BOT_TOKEN not set", hire.name)
+        return
+
+    user_id = _resolve_slack_user_id(hire, client)
+    if not user_id:
         return
 
     message = (
@@ -146,6 +171,7 @@ def _send_slack(hire: OnboardingInput, wiki_url: str, wiki_page_id: str = "") ->
         f"Reply to this message to ask me anything about your codebase."
     )
 
+    from slack_sdk.errors import SlackApiError  # type: ignore[import]
     try:
         client.chat_postMessage(channel=user_id, text=message)
         logger.info("Slack DM sent to @%s (%s)", hire.slack_handle, hire.name)
@@ -153,19 +179,52 @@ def _send_slack(hire: OnboardingInput, wiki_url: str, wiki_page_id: str = "") ->
         logger.exception("Slack chat_postMessage failed for %s", hire.name)
         return
 
-    # Store user_id → wiki_page_id mapping so the bot can route follow-up DMs
     if wiki_page_id:
-        import json as _json
-        from pathlib import Path as _Path
-        data_dir = _Path(os.getenv("CHAT_DATA_DIR", "data"))
-        data_dir.mkdir(parents=True, exist_ok=True)
-        map_path = data_dir / "slack_wiki_map.json"
-        mapping: dict = {}
-        if map_path.exists():
-            try:
-                mapping = _json.loads(map_path.read_text())
-            except Exception:
-                pass
-        mapping[user_id] = wiki_page_id
-        map_path.write_text(_json.dumps(mapping, indent=2))
-        logger.info("Slack wiki mapping saved: %s → %s", user_id, wiki_page_id)
+        _update_slack_wiki_map(user_id, wiki_page_id)
+
+
+def notify_light_refresh(hire: OnboardingInput, wiki_url: str) -> None:
+    """Send a Slack DM notifying the hire that their wiki has been lightly refreshed."""
+    if not hire.slack_handle:
+        return
+    try:
+        client = _slack_client()
+        if not client:
+            return
+        user_id = _resolve_slack_user_id(hire, client)
+        if not user_id:
+            return
+        from slack_sdk.errors import SlackApiError  # type: ignore[import]
+        message = (
+            f"Hi {hire.name}! Your onboarding wiki has been updated with the latest "
+            f"open issues and recent PRs.\n\n{wiki_url}"
+        )
+        client.chat_postMessage(channel=user_id, text=message)
+        logger.info("Light refresh DM sent to @%s", hire.slack_handle)
+    except Exception:
+        logger.exception("notify_light_refresh failed for %s", hire.name)
+
+
+def notify_full_refresh(hire: OnboardingInput, new_wiki_url: str, new_wiki_page_id: str = "") -> None:
+    """Send a Slack DM notifying the hire that their wiki has been fully refreshed."""
+    if not hire.slack_handle:
+        return
+    try:
+        client = _slack_client()
+        if not client:
+            return
+        user_id = _resolve_slack_user_id(hire, client)
+        if not user_id:
+            return
+        from slack_sdk.errors import SlackApiError  # type: ignore[import]
+        message = (
+            f"Hi {hire.name}! Your onboarding wiki has been fully refreshed with the "
+            f"latest codebase context. Your previous wiki has been archived.\n\n"
+            f"New wiki: {new_wiki_url}"
+        )
+        client.chat_postMessage(channel=user_id, text=message)
+        logger.info("Full refresh DM sent to @%s", hire.slack_handle)
+        if new_wiki_page_id:
+            _update_slack_wiki_map(user_id, new_wiki_page_id)
+    except Exception:
+        logger.exception("notify_full_refresh failed for %s", hire.name)
