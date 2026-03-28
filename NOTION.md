@@ -110,13 +110,9 @@ Without a webhook, Rosetta polls the database every 5 minutes for `Status = Read
 ngrok http 8000
 ```
 
-Copy the `https://` Forwarding URL. Add it to your `.env`:
+Copy the `https://` Forwarding URL — you'll need it in the next step.
 
-```
-WEBHOOK_PUBLIC_URL=https://abc123.ngrok-free.app
-```
-
-> ngrok free tier generates a new URL every session. When you restart ngrok, update `WEBHOOK_PUBLIC_URL` in `.env` and the webhook URL in the Notion dashboard, then restart `rosetta serve`.
+> ngrok free tier generates a new URL every session. When you restart ngrok, update the webhook URL in the Notion dashboard and restart `rosetta serve`.
 
 **2. Start Rosetta**
 

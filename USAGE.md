@@ -36,8 +36,7 @@ GITHUB_TOKEN=github_pat_...
 GEMINI_API_KEY=AIza...
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
-NOTION_WEBHOOK_SECRET=<verification token from webhook setup>
-WEBHOOK_PUBLIC_URL=https://<ngrok-url>   # only needed for webhook auto-trigger
+NOTION_WEBHOOK_SECRET=<auto-written by rosetta serve during webhook verification>
 CLAUDE_MODEL=claude-haiku-4-5-20251001
 GITHUB_MAX_ISSUES=3
 GITHUB_MAX_PRS=2
@@ -56,8 +55,7 @@ GITHUB_TREE_DEPTH=1
 | `GEMINI_API_KEY` | Yes (for Slack chat) | Google AI Studio key — powers RAG for the Slack bot |
 | `SLACK_BOT_TOKEN` | Yes (for Slack) | Slack bot OAuth token (`xoxb-...`) |
 | `SLACK_APP_TOKEN` | Yes (for Slack chat) | Slack app-level token (`xapp-...`) with `connections:write` — enables Socket Mode |
-| `NOTION_WEBHOOK_SECRET` | No | Verification token from webhook setup — enables instant auto-trigger |
-| `WEBHOOK_PUBLIC_URL` | No | Public ngrok URL — only needed alongside `NOTION_WEBHOOK_SECRET` for webhook auto-trigger |
+| `NOTION_WEBHOOK_SECRET` | No | Verification token from webhook setup — enables instant auto-trigger. Written automatically by `rosetta serve` when Notion sends the verification request. |
 | `CLAUDE_MODEL` | No | Claude model to use (default: `claude-haiku-4-5-20251001`) |
 | `GITHUB_MAX_ISSUES` | No | Max issues to fetch per repo (default: `3`) |
 | `GITHUB_MAX_PRS` | No | Max PRs to fetch per repo (default: `2`) |
