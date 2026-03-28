@@ -12,10 +12,14 @@ Install the package with ``pip install -e .`` then run:
     rosetta doctor                        — check configuration and API connections
     rosetta ls                            — list all hires in the queue
 
-Webhook auto-trigger (Milestone 3):
+Auto-trigger (default — polling):
+    rosetta serve polls the New Hire Requests database every 60 seconds for rows
+    with Status=Ready and kicks off wiki generation automatically.
+
+Webhook auto-trigger (optional — instant):
     Set NOTION_WEBHOOK_SECRET and point your Notion integration's webhook at
-    {WEBHOOK_PUBLIC_URL}/webhook/notion.  When a DB row's Status is set to Ready,
-    Notion fires page.properties_updated and rosetta serve processes it automatically.
+    <your-ngrok-url>/webhook/notion.  When a DB row's Status is set to Ready,
+    Notion fires page.properties_updated and rosetta serve processes it instantly.
 
 Scheduled refresh (Milestone 5):
     Set REFRESH_ENABLED=true. rosetta serve will automatically run a light refresh
@@ -282,7 +286,12 @@ def serve(
         "",
         f"  Gemini RAG    {_feat(gemini_ok, 'enabled', 'GEMINI_API_KEY not set')}",
         f"  Slack bot     {_feat(slack_ok, 'enabled', 'SLACK_APP_TOKEN not set')}",
-        f"  Webhook       {_feat(webhook_ok, 'enabled — instant auto-trigger', 'not set — polling every 5 min')}",
+        f"  Webhook       {_feat(webhook_ok, 'enabled — instant auto-trigger', 'not configured — polling every 60s')}",
+        *([
+            "  [dim]             To enable: 1) ngrok http 8000[/dim]",
+            "  [dim]             2) register <ngrok-url>/webhook/notion in Notion dashboard[/dim]",
+            "  [dim]             3) token auto-writes to .env on first connection[/dim]",
+        ] if not webhook_ok else []),
         f"  Refresh       {_feat(refresh_enabled, f'enabled  (Fridays 17:00 {refresh_tz}, alternating)', 'REFRESH_ENABLED=false')}",
         "",
         "  To add a new hire: run [dim]rosetta onboard[/dim] in another terminal,",

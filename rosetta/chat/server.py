@@ -14,7 +14,11 @@ Routes:
 The server loads VectorStore pickles from ./data.
 Stores are cached in memory after the first load per wiki_id.
 
-Webhook flow (M3):
+Polling loop (default):
+    Every 60 seconds, the server queries the New Hire Requests database for rows
+    with Status=Ready and triggers the full onboard flow for each one.
+
+Webhook flow (optional — instant trigger):
     Notion fires page.properties_updated when a DB row is edited.
     The handler verifies the HMAC-SHA256 signature, checks if Status=Ready,
     and runs the full onboard flow as a FastAPI BackgroundTask so Notion
@@ -43,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """Start background tasks (Slack bot, scheduler) alongside uvicorn."""
+    """Start background tasks (Slack bot, poller, scheduler) alongside uvicorn."""
     tasks: list[asyncio.Task] = []
     data_dir = Path("data")
 
@@ -53,9 +57,14 @@ async def _lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(start_bot(data_dir)))
         logger.info("Slack bot task created.")
 
+    notion_token = os.getenv("NOTION_TOKEN", "")
+    database_id = os.getenv("NOTION_DATABASE_ID", "")
+    if notion_token and database_id:
+        tasks.append(asyncio.create_task(_poll_pending_hires(notion_token, database_id)))
+        logger.info("Pending-hires poller started (60s interval).")
+
     if os.getenv("REFRESH_ENABLED", "false").lower() == "true":
-        notion_token = os.getenv("NOTION_TOKEN", "")
-        data_source_id = os.getenv("NOTION_DATABASE_ID", "")
+        data_source_id = database_id or os.getenv("NOTION_DATABASE_ID", "")
         parent_page_id = os.getenv("NOTION_ONBOARDING_PAGE_ID", "")
         model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
         if notion_token and data_source_id and parent_page_id:
@@ -66,7 +75,7 @@ async def _lifespan(app: FastAPI):
             logger.info("Scheduler task created (REFRESH_ENABLED=true).")
         else:
             logger.warning(
-                "REFRESH_ENABLED=true but NOTION_TOKEN / NOTION_DATA_SOURCE_ID / "
+                "REFRESH_ENABLED=true but NOTION_TOKEN / NOTION_DATABASE_ID / "
                 "NOTION_ONBOARDING_PAGE_ID not fully set — scheduler not started."
             )
 
@@ -78,6 +87,27 @@ async def _lifespan(app: FastAPI):
             await task
         except (asyncio.CancelledError, Exception):
             pass
+
+
+async def _poll_pending_hires(notion_token: str, database_id: str) -> None:
+    """
+    Background loop: every 60 seconds, query the New Hire Requests database
+    for rows with Status=Ready and trigger the full onboard flow for each.
+    """
+    from ..notion.mcp_session import NotionMCPSession
+
+    while True:
+        await asyncio.sleep(60)
+        try:
+            async with NotionMCPSession(token=notion_token) as session:
+                hires = await session.query_pending_hires(database_id)
+            for hire in hires:
+                logger.info("Poller: found Ready row — triggering onboard for %s", hire.name)
+                asyncio.create_task(_handle_hire_if_ready(hire.db_row_id))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Poller: error querying pending hires")
 
 
 app = FastAPI(title="Rosetta Onboarding Chat", lifespan=_lifespan)

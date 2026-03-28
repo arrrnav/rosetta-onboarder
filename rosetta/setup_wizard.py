@@ -570,7 +570,7 @@ def _ask_webhook(collected: dict) -> None:
         "Set up Notion webhook auto-trigger?",
         choices=[
             questionary.Choice("Yes — trigger wiki generation the moment a row is set to Ready", value="yes"),
-            questionary.Choice("Skip — rosetta serve will poll every 5 minutes instead", value="skip"),
+            questionary.Choice("Skip — rosetta serve will poll every 60 seconds instead", value="skip"),
         ],
         style=_STYLE,
     ).ask()
@@ -699,10 +699,27 @@ def run() -> None:
         expand=False,
     ))
 
+    # Prereqs banner — browser tasks to complete before the wizard
+    console.print(Panel(
+        "[bold]Before you start — have these ready:[/bold]\n\n"
+        "  [cyan]Notion integration token[/cyan]  (required)\n"
+        "  [dim]notion.so/profile/integrations (check docs\\NOTION.md for info)[/dim]\n\n"
+        "  [cyan]Anthropic API key[/cyan]  (required)\n"
+        "  [dim]console.anthropic.com[/dim]\n\n"
+        "  [cyan]GitHub personal access token[/cyan]  (recommended)\n"
+        "  [dim]github.com/settings/tokens[/dim]\n\n"
+        "  [cyan]Gemini API key[/cyan]  (recommended — enables Slack bot wiki Q&A)\n"
+        "  [dim]aistudio.google.com[/dim]\n\n"
+        "  [cyan]Slack bot + app-level tokens[/cyan]  (recommended — notifications + chat)\n"
+        "  [dim]api.slack.com/apps (check docs\\SLACK.md for info)[/dim]",
+        title="[bold yellow]Prerequisites[/bold yellow]",
+        expand=False,
+    ))
+    questionary.press_any_key_to_continue("  Press any key when you're ready…", style=_STYLE).ask()
+
     try:
         _ask_notion(collected)
         _ask_notion_workspace(collected)
-        _ask_webhook(collected)
         _ask_anthropic(collected)
         _ask_github(collected)
         _ask_gemini(collected)
@@ -731,13 +748,6 @@ def run() -> None:
     lines = ["[bold]Written to .env:[/bold]\n"]
     for key in written:
         lines.append(f"  [green]✔[/green]  {_KEY_LABELS.get(key, key)}")
-    lines += [
-        "",
-        "  [bold]Next steps:[/bold]",
-        "    [dim]rosetta doctor[/dim]      verify everything is connected",
-        "    [dim]rosetta serve[/dim]       start the processing server",
-        "    [dim]rosetta ls[/dim]          view the new hire queue",
-    ]
 
     console.print()
     console.print(Panel(
@@ -746,3 +756,8 @@ def run() -> None:
         expand=False,
     ))
     console.print()
+
+    # Auto-run doctor so the user sees verification results immediately
+    console.print("[bold]Verifying connections…[/bold]\n")
+    from .doctor import run as doctor_run
+    doctor_run()

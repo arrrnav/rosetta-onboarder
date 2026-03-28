@@ -147,7 +147,7 @@ def _check_webhook() -> _Result:
     secret = os.environ.get("NOTION_WEBHOOK_SECRET", "")
     if secret:
         return _Result("Notion webhook", True, "secret set — instant auto-trigger enabled")
-    return _Result("Notion webhook", None, "not configured (optional — falls back to 5-min poll)")
+    return _Result("Notion webhook", None, "not configured (optional — falls back to 60s poll)")
 
 
 def _check_refresh() -> _Result:

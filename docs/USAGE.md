@@ -146,7 +146,7 @@ In the app settings: **OAuth & Permissions** → **Bot Token Scopes**. Add:
 
 ## Webhook setup (optional — enables instant auto-trigger)
 
-Without a webhook, `rosetta serve` polls the New Hire Requests database every 5 minutes for rows with `Status = Ready`. The webhook makes it instant. Both require `rosetta serve` to be running.
+By default, `rosetta serve` polls the New Hire Requests database every 60 seconds for rows with `Status = Ready`. The webhook makes it instant — the moment a team lead sets a row to Ready, Rosetta starts generating. Both require `rosetta serve` to be running.
 
 **1. Start a public tunnel**
 
@@ -154,15 +154,15 @@ Without a webhook, `rosetta serve` polls the New Hire Requests database every 5 
 ngrok http 8000
 ```
 
-Copy the `https://` Forwarding URL. Run `rosetta setup` (webhook step) or set `WEBHOOK_PUBLIC_URL` in `.env` directly.
+Copy the `https://` Forwarding URL.
 
-**Note:** ngrok free tier assigns a new URL each session. When you restart ngrok, update `WEBHOOK_PUBLIC_URL` in `.env` and the webhook URL in the Notion dashboard, then restart `rosetta serve`.
+**Note:** ngrok free tier assigns a new URL each session. When you restart ngrok, update the webhook URL in the Notion dashboard and restart `rosetta serve`.
 
 **2. Register the webhook in Notion**
 
 Go to [notion.so/profile/integrations](https://notion.so/profile/integrations) → your integration → **Webhooks** → **Add webhook**.
 
-- URL: `{WEBHOOK_PUBLIC_URL}/webhook/notion`
+- URL: `https://<your-ngrok-url>/webhook/notion`
 - Event: `page.properties_updated` only
 
 Click **Create subscription** — Notion immediately POSTs a verification token to the endpoint.
@@ -185,12 +185,11 @@ rosetta serve
 
 `rosetta serve` starts in one process: the uvicorn HTTP server (webhook listener), and the Slack Socket Mode bot (if `SLACK_APP_TOKEN` is set). The Slack bot connects outbound to Slack — no public URL needed for it.
 
-**With webhook auto-trigger (optional):**
+**With webhook auto-trigger (optional — instant instead of 60s poll):**
 
 ```bash
 # Terminal 1 — public tunnel for the Notion webhook endpoint
 ngrok http 8000
-# Update WEBHOOK_PUBLIC_URL in .env with the new ngrok URL
 
 # Terminal 2
 rosetta serve
@@ -202,7 +201,7 @@ rosetta serve
 rosetta onboard
 ```
 
-Prompts for name, role, GitHub repos, and contact details, then creates a `Ready` row in the database. `rosetta serve` picks it up automatically (instantly via webhook, or within 5 minutes via polling).
+Prompts for name, role, GitHub repos, and contact details, then creates a `Ready` row in the database. `rosetta serve` picks it up automatically within 60 seconds (or instantly if the optional webhook is configured).
 
 **Manual trigger (re-processing or debugging):**
 

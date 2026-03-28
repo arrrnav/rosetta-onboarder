@@ -74,28 +74,26 @@ Child wiki pages inherit this setting automatically.
 
 ---
 
-## 5. Copy the page IDs
+## 5. Copy the page IDs (skip if you let `rosetta setup` handle it)
 
 The page ID is the 32-character hex string at the end of any Notion URL:
 
 ```
 https://www.notion.so/My-Page-Title-a1b2c3d4e5f6...
-                                     ^^^^^^^^^^^^^^^^ this part
+                                    ^^^^^^^^^^^^^^^^ this part
 ```
 
-Set these in your `.env` (or run `rosetta setup` which does this automatically):
+Take note of these for manual setup:
 
-```
-NOTION_ONBOARDING_PAGE_ID=<hub page ID>
-NOTION_DATABASE_ID=<New Hire Requests database ID>
-NOTION_GRAVEYARD_PAGE_ID=<Wiki Archive page ID>
-```
+- Onboarding Page ID
+- New Hire Database Page ID
+- Wiki Archive Page ID
 
 ---
 
 ## 6. Webhook setup (optional)
 
-Without a webhook, Rosetta polls the database every 5 minutes for `Status = Ready` rows. The webhook makes triggering instant — the moment a team lead sets a row to Ready, Rosetta starts generating.
+Without a webhook, Rosetta polls the database every 60 seconds for `Status = Ready` rows. The webhook makes triggering instant — the moment a team lead sets a row to Ready, Rosetta starts generating.
 
 ### Prerequisites
 
@@ -113,6 +111,8 @@ ngrok http 8000
 Copy the `https://` Forwarding URL — you'll need it in the next step.
 
 > ngrok free tier generates a new URL every session. When you restart ngrok, update the webhook URL in the Notion dashboard and restart `rosetta serve`.
+
+*ngrok offers one permanent server URL which can be used to avoid updating the URL on server restart*
 
 **2. Start Rosetta**
 
@@ -162,7 +162,7 @@ The **Notion webhook** row should show `✔  enabled  (https://…/webhook/notio
 | Action | API calls made |
 |---|---|
 | `rosetta setup` | Creates database + archive page inside your hub |
-| `rosetta serve` (poll) | Queries database every 5 min for `Status = Ready` rows |
+| `rosetta serve` (poll) | Queries database every 60 seconds for `Status = Ready` rows |
 | `rosetta serve` (webhook) | Receives `page.properties_updated` events from Notion |
 | `rosetta onboard` | Reads the DB row, creates a wiki page as a child of the hub |
 | Wiki generation | Writes sections to the new wiki page, updates `Wiki URL` + `Status` on the DB row |
