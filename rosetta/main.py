@@ -66,27 +66,37 @@ def _require_env(key: str) -> str:
 
 @app.command()
 def onboard(
-    row_id: str = typer.Argument(
-        ...,
-        help="Notion page ID of the New Hire Requests DB row to process. "
-             "Find it in the row's URL: notion.so/.../<page-id>",
+    row_id: str | None = typer.Argument(
+        None,
+        help="Notion page ID of a DB row to process immediately. "
+             "Omit to add a new hire interactively instead.",
     ),
 ) -> None:
     """
-    Generate an onboarding wiki for a single new hire.
+    Add a new hire to the queue, or trigger processing for an existing row.
 
-    Reads the specified DB row, fetches the assigned GitHub repos, runs the
-    Claude agent, and creates a wiki page under the Engineering Onboarding
-    parent page.  Updates the DB row with Status=Done and the wiki URL when
-    complete.
+    Without a row ID: prompts for the hire's details and creates a new row in
+    the New Hire Requests database (Status=Ready).  rosetta serve picks it up
+    automatically.
+
+    With a row ID: manually triggers wiki generation for that specific DB row
+    (useful for re-processing or debugging).
     """
-    load_dotenv(dotenv_path=Path(__file__).parents[2] / ".env")          # secrets (A:\Programming\.env)
-    load_dotenv(dotenv_path=Path(__file__).parents[1] / ".env")          # project config (rosetta-onboarder\.env)
+    load_dotenv(dotenv_path=Path(__file__).parents[2] / ".env")
+    load_dotenv(dotenv_path=Path(__file__).parents[1] / ".env")
     _setup_logging(os.getenv("LOG_LEVEL", "INFO"))
 
     notion_token = _require_env("NOTION_TOKEN")
+
+    if row_id is None:
+        # Interactive add-a-hire flow
+        database_id = _require_env("NOTION_DATABASE_ID")
+        asyncio.run(_run_add_hire(notion_token, database_id))
+        return
+
+    # Manual trigger (existing behaviour — kept for debugging / re-processing)
     parent_page_id = _require_env("NOTION_ONBOARDING_PAGE_ID")
-    github_token = os.environ.get("GITHUB_TOKEN")   # optional but strongly recommended
+    github_token = os.environ.get("GITHUB_TOKEN")
     model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
     if not github_token:
@@ -94,6 +104,46 @@ def onboard(
                       "using unauthenticated GitHub API (60 req/hour limit).")
 
     asyncio.run(_run_onboard(row_id, notion_token, parent_page_id, github_token, model))
+
+
+async def _run_add_hire(notion_token: str, database_id: str) -> None:
+    """Interactive flow: collect hire details and create a Ready DB row."""
+    from .notion.mcp_session import NotionMCPSession
+
+    console.print()
+    name = typer.prompt("  New hire's full name")
+    role = typer.prompt("  Role")
+
+    console.print("  GitHub repo URLs [dim](one per line, empty line to finish)[/dim]")
+    repo_urls: list[str] = []
+    while True:
+        url = typer.prompt("  >", default="", show_default=False)
+        if not url:
+            break
+        repo_urls.append(url.strip())
+
+    notes = typer.prompt("  Additional notes for the agent [dim](optional)[/dim]",
+                         default="", show_default=False)
+    console.print()
+
+    async with NotionMCPSession(token=notion_token) as session:
+        try:
+            page_id = await session.create_hire_row(
+                database_id=database_id,
+                name=name,
+                role=role,
+                repo_urls=repo_urls,
+                notes=notes,
+            )
+        except Exception as exc:
+            console.print(f"[bold red]Error:[/bold red] Could not create row — {exc}")
+            raise typer.Exit(code=1)
+
+    console.print(f"[bold green]✔[/bold green] Row created — {name} is queued [dim](Status: Ready)[/dim]")
+    console.print(f"  [dim]Page ID: {page_id}[/dim]")
+    console.print()
+    console.print("  [dim]rosetta serve[/dim] will pick this up automatically, or")
+    console.print(f"  run [dim]rosetta onboard {page_id}[/dim] to trigger manually.")
 
 
 async def _run_onboard(
@@ -177,6 +227,61 @@ async def _run_onboard(
         # -- Milestone 4: notify the new hire --
         from .notify import notify_hire
         notify_hire(hire, wiki_url, wiki_page_id=wiki_page_id)
+
+
+# ---------------------------------------------------------------------------
+# ls command
+# ---------------------------------------------------------------------------
+
+@app.command(name="ls")
+def ls_command() -> None:
+    """
+    List all entries in the New Hire Requests database with their current status.
+    """
+    load_dotenv(dotenv_path=Path(__file__).parents[2] / ".env")
+    load_dotenv(dotenv_path=Path(__file__).parents[1] / ".env")
+    _setup_logging("WARNING")  # suppress info noise for this display command
+
+    notion_token = _require_env("NOTION_TOKEN")
+    database_id = _require_env("NOTION_DATABASE_ID")
+
+    asyncio.run(_run_ls(notion_token, database_id))
+
+
+async def _run_ls(notion_token: str, database_id: str) -> None:
+    from .notion.mcp_session import NotionMCPSession
+    from rich.table import Table
+
+    async with NotionMCPSession(token=notion_token) as session:
+        rows = await session.query_all_hires(database_id)
+
+    if not rows:
+        console.print("[dim]No hires found in the database.[/dim]")
+        return
+
+    _STATUS_STYLE = {
+        "Done": "green",
+        "Ready": "yellow",
+        "Processing": "blue",
+        "Pending": "dim",
+    }
+
+    table = Table(title=f"New Hire Requests — {len(rows)} row{'s' if len(rows) != 1 else ''}")
+    table.add_column("Name", style="bold")
+    table.add_column("Role")
+    table.add_column("Status")
+    table.add_column("Wiki")
+
+    for hire, status, wiki_url in rows:
+        style = _STATUS_STYLE.get(status, "")
+        status_cell = f"[{style}]{status}[/{style}]" if style else status
+        wiki_cell = wiki_url if wiki_url else "[dim]—[/dim]"
+        # Truncate long wiki URLs to keep the table tidy
+        if len(wiki_cell) > 60:
+            wiki_cell = wiki_cell[:57] + "…"
+        table.add_row(hire.name, hire.role or "—", status_cell, wiki_cell)
+
+    console.print(table)
 
 
 # ---------------------------------------------------------------------------
@@ -270,10 +375,36 @@ def serve(
                       "Run: pip install uvicorn")
         raise typer.Exit(code=1)
 
-    console.print(f"[bold green]Starting chat server[/bold green] on {host}:{port}")
-    console.print(f"  Chat widget: [link]http://localhost:{port}/chat/<wiki_page_id>[/link]")
-    console.print(f"  Health check: [link]http://localhost:{port}/health[/link]")
-    console.print("[dim]Press Ctrl+C to stop.[/dim]\n")
+    # Build feature status rows
+    gemini_ok = bool(os.environ.get("GEMINI_API_KEY"))
+    slack_ok = bool(os.environ.get("SLACK_APP_TOKEN"))
+    webhook_ok = bool(os.environ.get("NOTION_WEBHOOK_SECRET"))
+    refresh_enabled = os.environ.get("REFRESH_ENABLED", "false").lower() == "true"
+    refresh_tz = os.environ.get("REFRESH_TIMEZONE", "UTC")
+
+    def _feat(enabled: bool, yes: str, no: str) -> str:
+        if enabled:
+            return f"[green]✔[/green]  {yes}"
+        return f"[dim]–  {no}[/dim]"
+
+    lines = [
+        f"  Chat server   [link]http://{host}:{port}[/link]",
+        f"  Chat widget   [link]http://{host}:{port}/chat/<wiki_page_id>[/link]",
+        f"  Health        [link]http://{host}:{port}/health[/link]",
+        "",
+        f"  Gemini RAG    {_feat(gemini_ok, 'enabled', 'GEMINI_API_KEY not set — chat disabled')}",
+        f"  Slack bot     {_feat(slack_ok, 'enabled', 'SLACK_APP_TOKEN not set')}",
+        f"  Webhook       {_feat(webhook_ok, 'enabled', 'NOTION_WEBHOOK_SECRET not set')}",
+        f"  Refresh       {_feat(refresh_enabled, f'enabled  (Fridays 17:00 {refresh_tz}, alternating)', 'REFRESH_ENABLED=false')}",
+        "",
+        "  [dim]Press Ctrl+C to stop[/dim]",
+    ]
+
+    from rich.panel import Panel
+    from rich.text import Text
+    body = Text.from_markup("\n".join(lines))
+    console.print(Panel(body, title="[bold]Rosetta[/bold]", expand=False))
+    console.print()
 
     uvicorn.run(
         "rosetta.chat.server:app",
@@ -281,6 +412,45 @@ def serve(
         port=port,
         log_level=os.getenv("LOG_LEVEL", "info").lower(),
     )
+
+
+# ---------------------------------------------------------------------------
+# doctor command
+# ---------------------------------------------------------------------------
+
+@app.command()
+def doctor() -> None:
+    """
+    Check configuration and verify live API connections.
+
+    Prints a table showing whether each required and optional service is
+    reachable.  Exits with code 1 if any required check fails.
+    """
+    load_dotenv(dotenv_path=Path(__file__).parents[2] / ".env")
+    load_dotenv(dotenv_path=Path(__file__).parents[1] / ".env")
+
+    from .doctor import run as doctor_run
+    doctor_run()
+
+
+# ---------------------------------------------------------------------------
+# setup command
+# ---------------------------------------------------------------------------
+
+@app.command()
+def setup() -> None:
+    """
+    Interactive first-run setup wizard.
+
+    Walks through configuring Notion, GitHub, Gemini, Slack, SMTP, and refresh
+    settings. Can automatically create the Notion workspace structure for you.
+    Writes all values to .env in the project root.
+    """
+    load_dotenv(dotenv_path=Path(__file__).parents[2] / ".env")
+    load_dotenv(dotenv_path=Path(__file__).parents[1] / ".env")
+
+    from .setup_wizard import run as wizard_run
+    wizard_run(env_path=Path(__file__).parents[1] / ".env")
 
 
 # ---------------------------------------------------------------------------

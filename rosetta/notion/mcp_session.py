@@ -299,6 +299,76 @@ class NotionMCPSession:
             hires.append((hire, wiki_url, wiki_page_id))
         return hires
 
+    async def query_all_hires(
+        self, data_source_id: str
+    ) -> list[tuple[OnboardingInput, str, str]]:
+        """
+        Query the New Hire Requests database for all rows regardless of status.
+
+        Returns a list of (hire, status, wiki_url) tuples. Rows with an empty
+        Name are skipped. wiki_url is empty string when not yet set.
+        """
+        import httpx
+        url = f"https://api.notion.com/v1/databases/{data_source_id}/query"
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, headers=headers, json={})
+        raw = resp.json()
+        results = []
+        for row in raw.get("results", []):
+            hire = parse_db_row(row)
+            if not hire.name:
+                continue
+            status = row.get("properties", {}).get("Status", {}).get("select", {})
+            status_name = status.get("name", "Pending") if status else "Pending"
+            wiki_url = _read_url_prop(row.get("properties", {}), "Wiki URL")
+            results.append((hire, status_name, wiki_url))
+        return results
+
+    async def create_hire_row(
+        self,
+        database_id: str,
+        name: str,
+        role: str,
+        repo_urls: list[str],
+        notes: str = "",
+    ) -> str:
+        """
+        Create a new row in the New Hire Requests database with Status=Ready.
+
+        Returns the new page ID so the caller can show a confirmation URL.
+        """
+        repos_text = "\n".join(repo_urls)
+        result = await self._session.call_tool(
+            "API-post-page",
+            {
+                "parent": {"database_id": database_id},
+                "properties": {
+                    "Name": {
+                        "title": [{"text": {"content": name}}]
+                    },
+                    "Role": {
+                        "rich_text": [{"text": {"content": role}}]
+                    },
+                    "GitHub Repos": {
+                        "rich_text": [{"text": {"content": repos_text}}]
+                    },
+                    "Notes": {
+                        "rich_text": [{"text": {"content": notes}}]
+                    },
+                    "Status": {
+                        "select": {"name": "Ready"}
+                    },
+                },
+            },
+        )
+        data = _extract_json(result)
+        return data.get("id", "")
+
     async def move_page(self, page_id: str, new_parent_page_id: str) -> None:
         """Reparent a Notion page (used to archive old wikis to the graveyard page).
 
