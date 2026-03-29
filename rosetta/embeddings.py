@@ -41,15 +41,22 @@ EMBED_MODEL = "models/gemini-embedding-2-preview"
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+_genai_client = None
+
+
 def _configure_genai():
-    """Create and return a google.genai Client."""
+    """Create (or return cached) google.genai Client."""
+    global _genai_client
+    if _genai_client is not None:
+        return _genai_client
     from google import genai  # lazy import — not everyone runs the server
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
             "GEMINI_API_KEY is not set. Add it to your secrets .env file."
         )
-    return genai.Client(api_key=api_key)
+    _genai_client = genai.Client(api_key=api_key)
+    return _genai_client
 
 
 def _embed_text(client, text: str, task_type: str) -> list[float]:
@@ -71,16 +78,24 @@ def _embed_image(client, url: str) -> list[float] | None:
             url,
             headers={"User-Agent": "rosetta-onboarder/1.0"},
         )
+        _SUPPORTED = {"image/jpeg", "image/png", "image/gif", "image/webp"}
         with urllib.request.urlopen(req, timeout=10) as resp:
+            content_type = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
             data = resp.read()
-        # Detect mime type from response headers or URL
-        mime_type = "image/jpeg"
-        if url.lower().endswith(".png"):
+        # Prefer Content-Type header; fall back to URL extension
+        if content_type in _SUPPORTED:
+            mime_type = content_type
+        elif url.lower().endswith(".png"):
             mime_type = "image/png"
         elif url.lower().endswith(".gif"):
             mime_type = "image/gif"
         elif url.lower().endswith(".webp"):
             mime_type = "image/webp"
+        elif url.lower().endswith((".jpg", ".jpeg")):
+            mime_type = "image/jpeg"
+        else:
+            logger.debug("Skipping image embed for %s — unsupported type %r", url, content_type or "unknown")
+            return None
         result = client.models.embed_content(
             model=EMBED_MODEL,
             contents=types.Part.from_bytes(data=data, mime_type=mime_type),

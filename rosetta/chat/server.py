@@ -1,5 +1,5 @@
 """
-FastAPI server — Milestone 2 (chat) + Milestone 3 (webhook trigger).
+FastAPI server — chat, polling, and webhook.
 
 Start with:
     rosetta serve
@@ -40,21 +40,25 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from ..config import DATA_DIR, DEFAULT_MODEL
 from ..embeddings import VectorStore
 
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Lifespan — background tasks
+# ---------------------------------------------------------------------------
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Start background tasks (Slack bot, poller, scheduler) alongside uvicorn."""
     tasks: list[asyncio.Task] = []
-    data_dir = Path("data")
 
     app_token = os.getenv("SLACK_APP_TOKEN", "")
     if app_token:
         from ..slack_bot import start_bot
-        tasks.append(asyncio.create_task(start_bot(data_dir)))
+        tasks.append(asyncio.create_task(start_bot(DATA_DIR)))
         logger.info("Slack bot task created.")
 
     notion_token = os.getenv("NOTION_TOKEN", "")
@@ -64,13 +68,12 @@ async def _lifespan(app: FastAPI):
         logger.info("Pending-hires poller started (60s interval).")
 
     if os.getenv("REFRESH_ENABLED", "false").lower() == "true":
-        data_source_id = database_id or os.getenv("NOTION_DATABASE_ID", "")
         parent_page_id = os.getenv("NOTION_ONBOARDING_PAGE_ID", "")
-        model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
-        if notion_token and data_source_id and parent_page_id:
+        model = os.getenv("CLAUDE_MODEL", DEFAULT_MODEL)
+        if notion_token and database_id and parent_page_id:
             from ..scheduler import start_scheduler
             tasks.append(asyncio.create_task(
-                start_scheduler(notion_token, data_source_id, parent_page_id, data_dir, model)
+                start_scheduler(notion_token, database_id, parent_page_id, DATA_DIR, model)
             ))
             logger.info("Scheduler task created (REFRESH_ENABLED=true).")
         else:
@@ -89,11 +92,12 @@ async def _lifespan(app: FastAPI):
             pass
 
 
+# ---------------------------------------------------------------------------
+# Polling loop
+# ---------------------------------------------------------------------------
+
 async def _poll_pending_hires(notion_token: str, database_id: str) -> None:
-    """
-    Background loop: every 60 seconds, query the New Hire Requests database
-    for rows with Status=Ready and trigger the full onboard flow for each.
-    """
+    """Query the DB every 60s for Status=Ready rows and trigger the pipeline."""
     from ..notion.mcp_session import NotionMCPSession
 
     while True:
@@ -103,12 +107,47 @@ async def _poll_pending_hires(notion_token: str, database_id: str) -> None:
                 hires = await session.query_pending_hires(database_id)
             for hire in hires:
                 logger.info("Poller: found Ready row — triggering onboard for %s", hire.name)
-                asyncio.create_task(_handle_hire_if_ready(hire.db_row_id))
+                asyncio.create_task(_run_pipeline_safe(hire.db_row_id))
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("Poller: error querying pending hires")
+        except BaseException as exc:
+            if isinstance(exc, ExceptionGroup):
+                for sub in exc.exceptions:
+                    logger.error("Poller: error querying pending hires — %s: %s",
+                                 type(sub).__name__, sub)
+            else:
+                logger.exception("Poller: error querying pending hires")
 
+
+async def _run_pipeline_safe(page_id: str) -> None:
+    """Run the shared pipeline, catching errors so one failure doesn't crash the server."""
+    from ..pipeline import run_onboard_pipeline
+
+    notion_token = os.getenv("NOTION_TOKEN", "")
+    parent_page_id = os.getenv("NOTION_ONBOARDING_PAGE_ID", "")
+    github_token = os.getenv("GITHUB_TOKEN")
+    model = os.getenv("CLAUDE_MODEL", DEFAULT_MODEL)
+
+    if not notion_token or not parent_page_id:
+        logger.error("NOTION_TOKEN or NOTION_ONBOARDING_PAGE_ID not set — cannot run onboard")
+        return
+
+    try:
+        await run_onboard_pipeline(
+            page_id=page_id,
+            notion_token=notion_token,
+            parent_page_id=parent_page_id,
+            github_token=github_token,
+            model=model,
+            on_status="Ready",
+        )
+    except Exception:
+        logger.exception("Pipeline failed for page %s", page_id)
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
 
 app = FastAPI(title="Rosetta Onboarding Chat", lifespan=_lifespan)
 
@@ -134,13 +173,9 @@ or asking a teammate).\
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _data_dir() -> Path:
-    return Path("data")
-
-
 def _get_store(wiki_id: str) -> VectorStore:
     if wiki_id not in _store_cache:
-        path = _data_dir() / f"{wiki_id}.pkl"
+        path = DATA_DIR / f"{wiki_id}.pkl"
         if not path.exists():
             raise HTTPException(
                 status_code=404,
@@ -201,7 +236,7 @@ def chat(wiki_id: str, req: ChatRequest):
 
     client = anthropic.Anthropic()
     response = client.messages.create(
-        model=os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
+        model=os.getenv("CLAUDE_MODEL", DEFAULT_MODEL),
         max_tokens=1024,
         system=_SYSTEM_PROMPT,
         messages=[
@@ -218,24 +253,12 @@ def chat(wiki_id: str, req: ChatRequest):
 
 
 # ---------------------------------------------------------------------------
-# Webhook endpoint (Milestone 3)
+# Webhook endpoint
 # ---------------------------------------------------------------------------
 
 @app.post("/webhook/notion")
 async def notion_webhook(request: Request, background_tasks: BackgroundTasks):
-    """
-    Receive Notion webhook events and auto-trigger onboarding.
-
-    Notion fires ``page.properties_updated`` whenever a DB row is edited.
-    We verify the HMAC-SHA256 signature, check if the updated page is a
-    New Hire Requests row with Status=Ready, and kick off the full onboard
-    flow as a background task — returning 200 immediately so Notion doesn't
-    retry.
-
-    Set NOTION_WEBHOOK_SECRET to the signing secret from the Notion
-    integration dashboard.  If the env var is unset, signature verification
-    is skipped (development only).
-    """
+    """Receive Notion webhook events and auto-trigger onboarding."""
     body = await request.body()
 
     try:
@@ -243,40 +266,13 @@ async def notion_webhook(request: Request, background_tasks: BackgroundTasks):
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Notion sends a verification_token request before the subscription is active.
-    # This request has no signature — handle it first, before the HMAC check.
+    # Handle verification token (before HMAC check — this request has no signature)
     verification_token = payload.get("verification_token")
     if verification_token:
-        # Always print — this is visible regardless of VERBOSE_LOGGING
-        print(f"\n{'=' * 60}")
-        print(f"  Notion webhook verification token received:")
-        print(f"  {verification_token}")
-        print(f"  Paste this into the Notion dashboard to activate the webhook.")
-        print(f"{'=' * 60}\n", flush=True)
+        return _handle_verification_token(verification_token)
 
-        # Auto-write to .env and activate immediately — no restart needed
-        try:
-            from dotenv import find_dotenv, set_key
-            env_path = find_dotenv(usecwd=True) or ".env"
-            set_key(env_path, "NOTION_WEBHOOK_SECRET", verification_token)
-            os.environ["NOTION_WEBHOOK_SECRET"] = verification_token
-            print("  NOTION_WEBHOOK_SECRET written to .env and active.\n", flush=True)
-        except Exception as exc:
-            print(f"  Could not auto-write to .env: {exc}", flush=True)
-            print(f"  Add manually: NOTION_WEBHOOK_SECRET={verification_token}\n", flush=True)
-
-        return {"ok": True}
-
-    # Verify HMAC-SHA256 signature for all non-verification requests
-    secret = os.getenv("NOTION_WEBHOOK_SECRET", "")
-    if secret:
-        sig_header = request.headers.get("X-Notion-Signature", "")
-        expected = "sha256=" + hmac.new(
-            secret.encode(), body, hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(sig_header, expected):
-            logger.warning("Webhook: invalid signature — rejecting request")
-            raise HTTPException(status_code=401, detail="Invalid signature")
+    # Verify HMAC-SHA256 signature
+    _verify_signature(request, body)
 
     event_type = payload.get("type", "")
     page_id = payload.get("entity", {}).get("id", "")
@@ -284,95 +280,41 @@ async def notion_webhook(request: Request, background_tasks: BackgroundTasks):
     logger.info("Webhook: received event=%s page_id=%s", event_type, page_id)
 
     if event_type == "page.properties_updated" and page_id:
-        background_tasks.add_task(_handle_hire_if_ready, page_id)
+        background_tasks.add_task(_run_pipeline_safe, page_id)
 
     return {"ok": True}
 
 
-async def _handle_hire_if_ready(page_id: str) -> None:
-    """
-    Background task: fetch the DB row and run the full onboard flow if Status=Ready.
-
-    Guards against re-processing by checking Status before doing anything.
-    Rows that are already Processing or Done are silently skipped.
-    """
-    from ..agent import run_onboarding_agent
-    from ..embeddings import index_wiki
-    from ..github.fetcher import GithubFetcher
-    from ..notion.mcp_session import NotionMCPSession
-
-    notion_token = os.getenv("NOTION_TOKEN", "")
-    parent_page_id = os.getenv("NOTION_ONBOARDING_PAGE_ID", "")
-    github_token = os.getenv("GITHUB_TOKEN")
-    model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
-
-    if not notion_token or not parent_page_id:
-        logger.error(
-            "Webhook: NOTION_TOKEN or NOTION_ONBOARDING_PAGE_ID not set — "
-            "cannot run onboard"
-        )
-        return
-
-    fetcher = GithubFetcher(token=github_token)
+def _handle_verification_token(token: str) -> dict:
+    """Print and auto-write the verification token to .env."""
+    print(f"\n{'=' * 60}")
+    print(f"  Notion webhook verification token received:")
+    print(f"  {token}")
+    print(f"  Paste this into the Notion dashboard to activate the webhook.")
+    print(f"{'=' * 60}\n", flush=True)
 
     try:
-        async with NotionMCPSession(token=notion_token) as session:
-            # Guard: only process rows where Status = "Ready"
-            status = await session.fetch_page_status(page_id)
-            if status != "Ready":
-                logger.info(
-                    "Webhook: page %s has Status=%r — skipping", page_id, status
-                )
-                return
+        from dotenv import find_dotenv, set_key
+        env_path = find_dotenv(usecwd=True) or ".env"
+        set_key(env_path, "NOTION_WEBHOOK_SECRET", token)
+        os.environ["NOTION_WEBHOOK_SECRET"] = token
+        print("  NOTION_WEBHOOK_SECRET written to .env and active.\n", flush=True)
+    except Exception as exc:
+        print(f"  Could not auto-write to .env: {exc}", flush=True)
+        print(f"  Add manually: NOTION_WEBHOOK_SECRET={token}\n", flush=True)
 
-            hire = await session.fetch_hire_row(page_id)
-            if not hire.name:
-                logger.warning("Webhook: row %s has no name — skipping", page_id)
-                return
+    return {"ok": True}
 
-            logger.info(
-                "Webhook: Status=Ready — starting onboard for %s (%s)",
-                hire.name, hire.role,
-            )
-            await session.update_hire_row(page_id, "Processing")
 
-            try:
-                wiki_url, wiki_page_id, wiki = await run_onboarding_agent(
-                    hire=hire,
-                    fetcher=fetcher,
-                    notion_session=session,
-                    parent_page_id=parent_page_id,
-                    model=model,
-                )
-            except Exception:
-                logger.exception("Webhook: agent failed for %s — rolling back", hire.name)
-                await session.update_hire_row(page_id, "Ready")
-                return
-
-            await session.update_hire_row(page_id, "Done", wiki_url=wiki_url)
-            logger.info("Webhook: wiki created for %s — %s", hire.name, wiki_url)
-
-            # Index embeddings for RAG chat
-            gemini_key = os.getenv("GEMINI_API_KEY")
-            if gemini_key and wiki_page_id:
-                try:
-                    image_urls: list[str] = []
-                    for repo_url in hire.repo_urls:
-                        try:
-                            image_urls.extend(fetcher.get_image_urls_from_readme(repo_url))
-                        except Exception:
-                            pass
-                    data_dir = Path("data")
-                    index_wiki(wiki, wiki_page_id, data_dir, image_urls=image_urls)
-                    logger.info("Webhook: embeddings indexed for %s", hire.name)
-                except Exception:
-                    logger.exception(
-                        "Webhook: embedding failed for %s", hire.name
-                    )
-
-            # Notify the new hire (after indexing so the Slack bot can answer immediately)
-            from ..notify import notify_hire
-            notify_hire(hire, wiki_url, wiki_page_id=wiki_page_id)
-
-    except Exception:
-        logger.exception("Webhook: unexpected error processing page %s", page_id)
+def _verify_signature(request: Request, body: bytes) -> None:
+    """Verify the HMAC-SHA256 signature on a webhook payload."""
+    secret = os.getenv("NOTION_WEBHOOK_SECRET", "")
+    if not secret:
+        return
+    sig_header = request.headers.get("X-Notion-Signature", "")
+    expected = "sha256=" + hmac.new(
+        secret.encode(), body, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(sig_header, expected):
+        logger.warning("Webhook: invalid signature — rejecting request")
+        raise HTTPException(status_code=401, detail="Invalid signature")

@@ -55,8 +55,8 @@ Also create a **Wiki Archive** page alongside the database — old wikis are mov
 Notion's internal integrations can only access pages they've been explicitly connected to.
 
 1. Open your onboarding hub page in Notion
-2. Click **...** (top right) → **Connect to**
-3. Select your integration from the list
+2. Click **...** (top right) → **Connections**
+3. Search/select your integration from the list
 
 The database and all child pages (generated wikis) are automatically included — you only need to do this once on the top-level page.
 

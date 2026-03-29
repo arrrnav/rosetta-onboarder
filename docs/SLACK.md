@@ -53,7 +53,7 @@ Without this, the message input box in the DM is disabled.
 
 **Event Subscriptions** → toggle on → **Subscribe to bot events** → **Add Bot User Event** → `message.im`. Save changes.
 
-Reinstall the app when prompted.
+Reinstall the app.
 
 ---
 

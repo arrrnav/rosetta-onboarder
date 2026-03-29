@@ -18,21 +18,12 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from .cli_helpers import QUESTIONARY_STYLE
+
 console = Console()
 
 _NOTION_API = "https://api.notion.com/v1"
 _GITHUB_API  = "https://api.github.com"
-
-_STYLE = questionary.Style([
-    ("qmark",        "fg:#00d7ff bold"),
-    ("question",     "bold"),
-    ("answer",       "fg:#00ff87 bold"),
-    ("pointer",      "fg:#00d7ff bold"),
-    ("highlighted",  "fg:#00d7ff bold"),
-    ("selected",     "fg:#00ff87"),
-    ("separator",    "fg:#555555"),
-    ("instruction",  "fg:#555555"),
-])
 
 _KEY_LABELS: dict[str, str] = {
     "NOTION_TOKEN":               "Notion token",
@@ -57,18 +48,59 @@ _SECRET_KEYS = {"NOTION_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GEMINI_API
 
 
 # ---------------------------------------------------------------------------
+# Reusable prompt helpers
+# ---------------------------------------------------------------------------
+
+def _prompt_validated_secret(
+    label: str,
+    validator: callable | None = None,
+    *,
+    required: bool = False,
+    success_template: str = "  [green]✔[/green]  {detail}",
+) -> str | None:
+    """
+    Prompt for a secret (password input) with optional live validation.
+
+    Args:
+        label:            The prompt text.
+        validator:        ``(value) -> (ok: bool, detail: str)`` or None.
+        required:         If True, empty input shows an error and retries.
+        success_template: Format string with ``{detail}`` placeholder.
+
+    Returns:
+        The validated value, or None if the user provides an empty string
+        (and ``required`` is False).
+    """
+    while True:
+        value = questionary.password(label, style=QUESTIONARY_STYLE).ask()
+        if value is None:
+            _cancelled()
+        value = value.strip()
+        if not value:
+            if required:
+                console.print(f"  [red]{label.split('(')[0].strip()} is required.[/red]")
+                continue
+            return None
+        if validator is None:
+            return value
+        console.print("  [dim]Validating...[/dim]", end="\r")
+        ok, detail = validator(value)
+        if ok:
+            console.print(success_template.format(detail=detail))
+            return value
+        console.print(f"  [red]✗[/red]  {detail} — try again")
+
+
+# ---------------------------------------------------------------------------
 # Notion ID parser
 # ---------------------------------------------------------------------------
 
 def _parse_notion_id(raw: str) -> str:
     """Extract a 32-char hex Notion page ID from a URL, dashed UUID, or plain hex."""
-    # Plain dashed UUID
     if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", raw.strip()):
         return raw.strip().replace("-", "")
-    # Plain 32-char hex
     if re.fullmatch(r"[0-9a-fA-F]{32}", raw.strip()):
         return raw.strip()
-    # URL: ID is the trailing 32-char hex in the last path segment
     clean = raw.split("?")[0].split("#")[0].rstrip("/")
     segment = clean.rsplit("/", 1)[-1]
     m = re.search(r"([0-9a-fA-F]{32})$", segment)
@@ -115,20 +147,13 @@ def _validate_github_token(token: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 def _provision_notion_workspace(token: str, parent_page_id: str) -> tuple[str, str, str]:
-    """
-    Create New Hire Requests DB and Wiki Archive inside the given page.
-
-    The page the user created and shared IS the onboarding hub
-    (NOTION_ONBOARDING_PAGE_ID) — we don't create another layer on top.
-    Returns (onboarding_id, db_id, graveyard_id) where onboarding_id == parent_page_id.
-    """
+    """Create New Hire Requests DB and Wiki Archive inside the given page."""
     headers = {
         "Authorization": f"Bearer {token}",
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
     }
     with httpx.Client(timeout=15) as client:
-        # New Hire Requests database — direct child of the onboarding hub
         resp = client.post(f"{_NOTION_API}/databases", headers=headers, json={
             "parent": {"type": "page_id", "page_id": parent_page_id},
             "title": [{"text": {"content": "New Hire Requests"}}],
@@ -152,7 +177,6 @@ def _provision_notion_workspace(token: str, parent_page_id: str) -> tuple[str, s
             raise RuntimeError(f"Could not create database: {resp.status_code} {resp.text[:200]}")
         db_id = resp.json()["id"]
 
-        # Wiki Archive page — sibling of the DB, inside the onboarding hub
         resp = client.post(f"{_NOTION_API}/pages", headers=headers, json={
             "parent": {"type": "page_id", "page_id": parent_page_id},
             "icon": {"type": "external", "external": {"url": "https://www.notion.so/icons/archive_yellow.svg"}},
@@ -162,7 +186,6 @@ def _provision_notion_workspace(token: str, parent_page_id: str) -> tuple[str, s
             raise RuntimeError(f"Could not create archive page: {resp.status_code} {resp.text[:200]}")
         graveyard_id = resp.json()["id"]
 
-        # Divider on the parent page, after the Wiki Archive
         client.patch(f"{_NOTION_API}/blocks/{parent_page_id}/children", headers=headers, json={
             "children": [{"object": "block", "type": "divider", "divider": {}}]
         })
@@ -177,24 +200,13 @@ def _provision_notion_workspace(token: str, parent_page_id: str) -> tuple[str, s
 def _ask_notion(collected: dict) -> None:
     """Step 1: Notion token."""
     console.print()
-    while True:
-        token = questionary.password(
-            "Notion integration token",
-            style=_STYLE,
-        ).ask()
-        if token is None:
-            _cancelled()
-        token = token.strip()
-        if not token:
-            console.print("  [red]Token cannot be empty.[/red]")
-            continue
-        console.print("  [dim]Validating…[/dim]", end="\r")
-        ok, detail = _validate_notion_token(token)
-        if ok:
-            console.print(f"  [green]✔[/green]  Connected to workspace: [bold]{detail}[/bold]")
-            collected["NOTION_TOKEN"] = token
-            return
-        console.print(f"  [red]✗[/red]  {detail} — try again")
+    token = _prompt_validated_secret(
+        "Notion integration token",
+        _validate_notion_token,
+        required=True,
+        success_template="  [green]✔[/green]  Connected to workspace: [bold]{detail}[/bold]",
+    )
+    collected["NOTION_TOKEN"] = token
 
 
 def _ask_notion_workspace(collected: dict) -> None:
@@ -206,73 +218,78 @@ def _ask_notion_workspace(collected: dict) -> None:
             questionary.Choice("Create it for me  (recommended)", value="create"),
             questionary.Choice("I already have one — enter IDs manually", value="manual"),
         ],
-        style=_STYLE,
+        style=QUESTIONARY_STYLE,
     ).ask()
     if choice is None:
         _cancelled()
 
     if choice == "create":
-        console.print(
-            "\n  [dim]1. Create a page in Notion with whatever name you like\n"
-            "     (e.g. 'Engineering Onboarding') — this will be your onboarding hub\n"
-            "  2. Open it → click [bold]...[/bold] → [bold]Connect to[/bold] → select your integration\n"
-            "  3. Paste its URL or ID below[/dim]"
-        )
-        while True:
-            raw = questionary.text(
-                "Onboarding hub page URL or ID",
-                style=_STYLE,
-            ).ask()
-            if raw is None:
-                _cancelled()
-            parent_id = _parse_notion_id(raw.strip())
-            if not parent_id:
-                console.print("  [red]✗[/red]  Couldn't parse a Notion ID — paste the full URL or 32-char hex ID")
-                continue
-
-            console.print("  [dim]Creating workspace structure…[/dim]", end="\r")
-            try:
-                onboarding_id, db_id, graveyard_id = _provision_notion_workspace(
-                    collected["NOTION_TOKEN"], parent_id
-                )
-            except RuntimeError as exc:
-                msg = str(exc)
-                if "404" in msg or "object_not_found" in msg:
-                    console.print(
-                        "  [red]✗[/red]  Page not found — your integration doesn't have access to it yet.\n\n"
-                        "  [bold]To fix:[/bold]\n"
-                        "  [dim]1. Open that page in Notion\n"
-                        "  2. Click [bold]...[/bold] (top right) → [bold]Connect to[/bold]\n"
-                        "  3. Select your integration from the list\n"
-                        "  Then paste the URL again below.[/dim]"
-                    )
-                else:
-                    console.print(f"  [red]✗[/red]  {msg}")
-                    next_step = questionary.select(
-                        "What would you like to do?",
-                        choices=[
-                            questionary.Choice("Try a different page", value="retry"),
-                            questionary.Choice("Enter IDs manually instead", value="manual"),
-                        ],
-                        style=_STYLE,
-                    ).ask()
-                    if next_step is None or next_step == "manual":
-                        _ask_notion_ids_manually(collected)
-                        return
-                continue  # loop back to URL prompt
-
-            console.print(f"  [green]✔[/green]  Onboarding hub          [dim](your page)[/dim]")
-            console.print(f"  [green]✔[/green]  New Hire Requests DB    [dim]{db_id}[/dim]")
-            console.print(f"  [green]✔[/green]  Wiki Archive            [dim]{graveyard_id}[/dim]")
-            collected["NOTION_ONBOARDING_PAGE_ID"] = onboarding_id
-            collected["NOTION_DATABASE_ID"]         = db_id
-            collected["NOTION_GRAVEYARD_PAGE_ID"]   = graveyard_id
-            break
-
+        _ask_notion_workspace_create(collected)
     else:
         _ask_notion_ids_manually(collected)
 
-    # Public sharing reminder — new hires receive a Notion link via Slack/email
+    _ask_public_sharing()
+
+
+def _ask_notion_workspace_create(collected: dict) -> None:
+    """Auto-provision: prompt for hub page, create DB + archive inside it."""
+    console.print(
+        "\n  [dim]1. Create a page in Notion with whatever name you like\n"
+        "     (e.g. 'Engineering Onboarding') — this will be your onboarding hub\n"
+        "  2. Open it → click [bold]...[/bold] → [bold]Connect to[/bold] → select your integration\n"
+        "  3. Paste its URL or ID below[/dim]"
+    )
+    while True:
+        raw = questionary.text("Onboarding hub page URL or ID", style=QUESTIONARY_STYLE).ask()
+        if raw is None:
+            _cancelled()
+        parent_id = _parse_notion_id(raw.strip())
+        if not parent_id:
+            console.print("  [red]✗[/red]  Couldn't parse a Notion ID — paste the full URL or 32-char hex ID")
+            continue
+
+        console.print("  [dim]Creating workspace structure...[/dim]", end="\r")
+        try:
+            onboarding_id, db_id, graveyard_id = _provision_notion_workspace(
+                collected["NOTION_TOKEN"], parent_id
+            )
+        except RuntimeError as exc:
+            msg = str(exc)
+            if "404" in msg or "object_not_found" in msg:
+                console.print(
+                    "  [red]✗[/red]  Page not found — your integration doesn't have access to it yet.\n\n"
+                    "  [bold]To fix:[/bold]\n"
+                    "  [dim]1. Open that page in Notion\n"
+                    "  2. Click [bold]...[/bold] (top right) → [bold]Connect to[/bold]\n"
+                    "  3. Select your integration from the list\n"
+                    "  Then paste the URL again below.[/dim]"
+                )
+            else:
+                console.print(f"  [red]✗[/red]  {msg}")
+                next_step = questionary.select(
+                    "What would you like to do?",
+                    choices=[
+                        questionary.Choice("Try a different page", value="retry"),
+                        questionary.Choice("Enter IDs manually instead", value="manual"),
+                    ],
+                    style=QUESTIONARY_STYLE,
+                ).ask()
+                if next_step is None or next_step == "manual":
+                    _ask_notion_ids_manually(collected)
+                    return
+            continue
+
+        console.print(f"  [green]✔[/green]  Onboarding hub          [dim](your page)[/dim]")
+        console.print(f"  [green]✔[/green]  New Hire Requests DB    [dim]{db_id}[/dim]")
+        console.print(f"  [green]✔[/green]  Wiki Archive            [dim]{graveyard_id}[/dim]")
+        collected["NOTION_ONBOARDING_PAGE_ID"] = onboarding_id
+        collected["NOTION_DATABASE_ID"]         = db_id
+        collected["NOTION_GRAVEYARD_PAGE_ID"]   = graveyard_id
+        break
+
+
+def _ask_public_sharing() -> None:
+    """Remind the user to make the hub page public (if needed)."""
     console.print(
         "\n  [dim]New hires receive a link to their wiki via Slack or email.\n"
         "  If they don't have a Notion account they won't be able to open it\n"
@@ -290,7 +307,7 @@ def _ask_notion_workspace(collected: dict) -> None:
                 value="private",
             ),
         ],
-        style=_STYLE,
+        style=QUESTIONARY_STYLE,
     ).ask()
     if make_public is None:
         _cancelled()
@@ -304,7 +321,7 @@ def _ask_notion_workspace(collected: dict) -> None:
         confirmed = questionary.confirm(
             "I've made it public",
             default=True,
-            style=_STYLE,
+            style=QUESTIONARY_STYLE,
         ).ask()
         if confirmed is None:
             _cancelled()
@@ -312,29 +329,23 @@ def _ask_notion_workspace(collected: dict) -> None:
 
 def _ask_notion_ids_manually(collected: dict) -> None:
     """Prompt for the three Notion IDs when not auto-provisioning."""
-    while True:
-        raw = questionary.text("Engineering Onboarding page ID", style=_STYLE).ask()
-        if raw is None:
-            _cancelled()
-        pid = _parse_notion_id(raw.strip())
-        if pid:
-            collected["NOTION_ONBOARDING_PAGE_ID"] = pid
-            break
-        console.print("  [red]✗[/red]  Invalid ID — paste the page URL or 32-char hex ID")
-
-    while True:
-        raw = questionary.text("New Hire Requests database ID", style=_STYLE).ask()
-        if raw is None:
-            _cancelled()
-        did = _parse_notion_id(raw.strip())
-        if did:
-            collected["NOTION_DATABASE_ID"] = did
-            break
-        console.print("  [red]✗[/red]  Invalid ID")
+    for label, key in [
+        ("Engineering Onboarding page ID", "NOTION_ONBOARDING_PAGE_ID"),
+        ("New Hire Requests database ID", "NOTION_DATABASE_ID"),
+    ]:
+        while True:
+            raw = questionary.text(label, style=QUESTIONARY_STYLE).ask()
+            if raw is None:
+                _cancelled()
+            pid = _parse_notion_id(raw.strip())
+            if pid:
+                collected[key] = pid
+                break
+            console.print("  [red]✗[/red]  Invalid ID — paste the page URL or 32-char hex ID")
 
     raw = questionary.text(
         "Wiki Archive page ID  (optional — leave blank to skip)",
-        style=_STYLE,
+        style=QUESTIONARY_STYLE,
     ).ask()
     if raw is None:
         _cancelled()
@@ -344,26 +355,18 @@ def _ask_notion_ids_manually(collected: dict) -> None:
 
 
 def _ask_anthropic(collected: dict) -> None:
-    """Step 3: Anthropic API key (required — powers the Claude wiki agent)."""
+    """Step 3: Anthropic API key (required)."""
     console.print()
-    while True:
-        key = questionary.password(
-            "Anthropic API key  (console.anthropic.com)",
-            style=_STYLE,
-        ).ask()
-        if key is None:
-            _cancelled()
-        key = key.strip()
-        if not key:
-            console.print("  [red]Anthropic API key is required — the Claude agent cannot run without it.[/red]")
-            continue
-        collected["ANTHROPIC_API_KEY"] = key
-        console.print("  [green]✔[/green]  Anthropic API key saved")
-        return
+    key = _prompt_validated_secret(
+        "Anthropic API key  (console.anthropic.com)",
+        required=True,
+        success_template="  [green]✔[/green]  Anthropic API key saved",
+    )
+    collected["ANTHROPIC_API_KEY"] = key
 
 
 def _ask_github(collected: dict) -> None:
-    """Step 3: GitHub token (optional)."""
+    """Step 4: GitHub token (optional)."""
     console.print()
     choice = questionary.select(
         "Set up GitHub?",
@@ -371,7 +374,7 @@ def _ask_github(collected: dict) -> None:
             questionary.Choice("Yes — add a personal access token", value="yes"),
             questionary.Choice("Skip  (60 req/hour, public repos only)", value="skip"),
         ],
-        style=_STYLE,
+        style=QUESTIONARY_STYLE,
     ).ask()
     if choice is None:
         _cancelled()
@@ -379,24 +382,18 @@ def _ask_github(collected: dict) -> None:
         collected.pop("GITHUB_TOKEN", None)
         return
 
-    while True:
-        token = questionary.password("GitHub personal access token", style=_STYLE).ask()
-        if token is None:
-            _cancelled()
-        token = token.strip()
-        if not token:
-            continue
-        console.print("  [dim]Validating…[/dim]", end="\r")
-        ok, detail = _validate_github_token(token)
-        if ok:
-            console.print(f"  [green]✔[/green]  Authenticated as [bold]{detail}[/bold]")
-            collected["GITHUB_TOKEN"] = token
-            return
-        console.print(f"  [red]✗[/red]  {detail} — try again")
+    token = _prompt_validated_secret(
+        "GitHub personal access token",
+        _validate_github_token,
+        required=True,
+        success_template="  [green]✔[/green]  Authenticated as [bold]{detail}[/bold]",
+    )
+    if token:
+        collected["GITHUB_TOKEN"] = token
 
 
 def _ask_gemini(collected: dict) -> None:
-    """Step 4: Gemini API key (optional)."""
+    """Step 5: Gemini API key (optional)."""
     console.print()
     choice = questionary.select(
         "Set up Gemini?  (embeds wikis for RAG — lets the Slack bot answer questions about repos)",
@@ -404,7 +401,7 @@ def _ask_gemini(collected: dict) -> None:
             questionary.Choice("Yes — add a Gemini API key", value="yes"),
             questionary.Choice("Skip — Slack bot will run without wiki Q&A", value="skip"),
         ],
-        style=_STYLE,
+        style=QUESTIONARY_STYLE,
     ).ask()
     if choice is None:
         _cancelled()
@@ -414,7 +411,7 @@ def _ask_gemini(collected: dict) -> None:
 
     key = questionary.password(
         "Gemini API key  (aistudio.google.com)",
-        style=_STYLE,
+        style=QUESTIONARY_STYLE,
     ).ask()
     if key is None:
         _cancelled()
@@ -423,7 +420,7 @@ def _ask_gemini(collected: dict) -> None:
 
 
 def _ask_slack(collected: dict) -> None:
-    """Step 5: Slack (optional)."""
+    """Step 6: Slack (optional)."""
     console.print()
     choice = questionary.select(
         "Set up Slack notifications?",
@@ -431,7 +428,7 @@ def _ask_slack(collected: dict) -> None:
             questionary.Choice("Yes — configure Slack", value="yes"),
             questionary.Choice("Skip", value="skip"),
         ],
-        style=_STYLE,
+        style=QUESTIONARY_STYLE,
     ).ask()
     if choice is None:
         _cancelled()
@@ -440,10 +437,7 @@ def _ask_slack(collected: dict) -> None:
             collected.pop(k, None)
         return
 
-    bot = questionary.password(
-        "Slack bot token  (xoxb-…)",
-        style=_STYLE,
-    ).ask()
+    bot = questionary.password("Slack bot token  (xoxb-...)", style=QUESTIONARY_STYLE).ask()
     if bot is None:
         _cancelled()
     if bot.strip():
@@ -458,16 +452,16 @@ def _ask_slack(collected: dict) -> None:
             "  unless you provide this token.\n"
             "  Get one at api.slack.com/apps → your app → Basic Information → App-Level Tokens.[/dim]"
         )
-        app_tok_prompt = "Slack app-level token  (xapp-…)"
+        app_tok_prompt = "Slack app-level token  (xapp-...)"
     else:
         console.print(
-            "\n  [dim]An app-level token (xapp-…) enables the bot to receive messages.\n"
+            "\n  [dim]An app-level token (xapp-...) enables the bot to receive messages.\n"
             "  Without it, Rosetta can only send notifications (wiki ready, refresh alerts).\n"
             "  Get one at api.slack.com/apps → your app → Basic Information → App-Level Tokens.[/dim]"
         )
-        app_tok_prompt = "Slack app-level token  (xapp-… leave blank to skip)"
+        app_tok_prompt = "Slack app-level token  (xapp-... leave blank to skip)"
 
-    app_tok = questionary.password(app_tok_prompt, style=_STYLE).ask()
+    app_tok = questionary.password(app_tok_prompt, style=QUESTIONARY_STYLE).ask()
     if app_tok is None:
         _cancelled()
     if app_tok.strip():
@@ -505,7 +499,7 @@ _SMTP_PROVIDER_NOTES = {
 
 
 def _ask_smtp(collected: dict) -> None:
-    """Step 6: SMTP email notifications (optional)."""
+    """Step 7: SMTP email notifications (optional)."""
     console.print()
     provider = questionary.select(
         "Set up email notifications?",
@@ -516,7 +510,7 @@ def _ask_smtp(collected: dict) -> None:
             questionary.Choice("Other SMTP server",  value="other"),
             questionary.Choice("Skip",               value="skip"),
         ],
-        style=_STYLE,
+        style=QUESTIONARY_STYLE,
     ).ask()
     if provider is None:
         _cancelled()
@@ -530,101 +524,33 @@ def _ask_smtp(collected: dict) -> None:
     if note:
         console.print(f"\n  [dim]{note}[/dim]")
 
-    host = questionary.text(
-        "SMTP host",
-        default=host_default,
-        style=_STYLE,
-    ).ask()
+    host = questionary.text("SMTP host", default=host_default, style=QUESTIONARY_STYLE).ask()
     if host is None:
         _cancelled()
     collected["SMTP_HOST"] = host.strip() or host_default
 
-    port = questionary.text(
-        "SMTP port",
-        default=port_default,
-        style=_STYLE,
-    ).ask()
+    port = questionary.text("SMTP port", default=port_default, style=QUESTIONARY_STYLE).ask()
     if port is None:
         _cancelled()
     collected["SMTP_PORT"] = port.strip() or port_default
 
     user_prompt = "SendGrid username  (literally: apikey)" if provider == "sendgrid" else "Your email address"
-    user = questionary.text(user_prompt, style=_STYLE).ask()
+    user = questionary.text(user_prompt, style=QUESTIONARY_STYLE).ask()
     if user is None:
         _cancelled()
     if user.strip():
         collected["SMTP_USER"] = user.strip()
 
     pw_prompt = "SendGrid API key" if provider == "sendgrid" else "App password" if provider in ("gmail", "outlook") else "SMTP password"
-    pw = questionary.password(pw_prompt, style=_STYLE).ask()
+    pw = questionary.password(pw_prompt, style=QUESTIONARY_STYLE).ask()
     if pw is None:
         _cancelled()
     if pw.strip():
         collected["SMTP_PASSWORD"] = pw.strip()
 
 
-def _ask_webhook(collected: dict) -> None:
-    """Step 3: ngrok + Notion webhook (optional — enables instant auto-trigger)."""
-    console.print()
-    choice = questionary.select(
-        "Set up Notion webhook auto-trigger?",
-        choices=[
-            questionary.Choice("Yes — trigger wiki generation the moment a row is set to Ready", value="yes"),
-            questionary.Choice("Skip — rosetta serve will poll every 60 seconds instead", value="skip"),
-        ],
-        style=_STYLE,
-    ).ask()
-    if choice is None:
-        _cancelled()
-    if choice == "skip":
-        collected.pop("NOTION_WEBHOOK_SECRET", None)
-        return
-
-    # Step 1: ngrok
-    console.print(
-        "\n  [bold]Step 1 — start a public tunnel with ngrok[/bold]\n"
-        "  [dim]ngrok exposes your local rosetta serve to the internet so Notion\n"
-        "  can POST webhook events to it.\n\n"
-        "  If you don't have ngrok: https://ngrok.com/download\n\n"
-        "  In a separate terminal, run:\n"
-        "    ngrok http 8000\n\n"
-        "  Copy the Forwarding URL — it looks like:\n"
-        "    https://abc123.ngrok-free.app[/dim]"
-    )
-    questionary.press_any_key_to_continue("  Press any key once ngrok is running…", style=_STYLE).ask()
-
-    # Step 2: register webhook in Notion + get the secret
-    console.print(
-        "\n  [bold]Step 2 — register the webhook in Notion[/bold]\n"
-        "  [dim]1. Go to notion.so/profile/integrations → select your integration\n"
-        "  2. Click Add webhook\n"
-        "  3. URL: https://<your-ngrok-url>/webhook/notion\n"
-        "  4. Subscribe to the page.properties_updated event\n"
-        "  5. Start rosetta serve in another terminal\n"
-        "  6. Click Create subscription — Notion POSTs a verification token to rosetta serve\n"
-        "  7. Rosetta prints the token and writes it to .env automatically\n"
-        "  8. Paste the token into the Notion verification form[/dim]"
-    )
-
-    console.print(
-        "\n  [dim]Once rosetta serve receives the token it writes NOTION_WEBHOOK_SECRET\n"
-        "  to .env automatically. You can skip this field if that already happened.[/dim]"
-    )
-    secret = questionary.password(
-        "Verification token  (leave blank if rosetta serve already wrote it)",
-        style=_STYLE,
-    ).ask()
-    if secret is None:
-        _cancelled()
-    if secret.strip():
-        collected["NOTION_WEBHOOK_SECRET"] = secret.strip()
-        console.print("  [green]✔[/green]  Webhook secret saved")
-    else:
-        console.print("  [dim]Skipped — rosetta serve will have written it automatically.[/dim]")
-
-
 def _ask_refresh(collected: dict) -> None:
-    """Step 7: scheduled Friday refresh (optional)."""
+    """Step 8: scheduled Friday refresh (optional)."""
     console.print()
     choice = questionary.select(
         "Enable scheduled Friday wiki refresh?",
@@ -632,7 +558,7 @@ def _ask_refresh(collected: dict) -> None:
             questionary.Choice("Yes — refresh wikis every Friday automatically", value="yes"),
             questionary.Choice("No — I'll run rosetta refresh manually", value="no"),
         ],
-        style=_STYLE,
+        style=QUESTIONARY_STYLE,
     ).ask()
     if choice is None:
         _cancelled()
@@ -643,14 +569,49 @@ def _ask_refresh(collected: dict) -> None:
         return
 
     collected["REFRESH_ENABLED"] = "true"
-    tz = questionary.text(
-        "Timezone  (e.g. America/New_York)",
-        default=collected.get("REFRESH_TIMEZONE", "UTC"),
-        style=_STYLE,
+    _TZ_CHOICES = [
+        questionary.Choice("UTC",                     value="UTC"),
+        questionary.Separator("── Americas ──"),
+        questionary.Choice("US/Eastern  (New York)",  value="America/New_York"),
+        questionary.Choice("US/Central  (Chicago)",   value="America/Chicago"),
+        questionary.Choice("US/Mountain (Denver)",    value="America/Denver"),
+        questionary.Choice("US/Pacific  (LA)",        value="America/Los_Angeles"),
+        questionary.Choice("US/Alaska",               value="America/Anchorage"),
+        questionary.Choice("US/Hawaii",               value="Pacific/Honolulu"),
+        questionary.Choice("Canada/Toronto",          value="America/Toronto"),
+        questionary.Choice("Canada/Vancouver",        value="America/Vancouver"),
+        questionary.Choice("Brazil/São Paulo",        value="America/Sao_Paulo"),
+        questionary.Separator("── Europe ──"),
+        questionary.Choice("UK/Ireland  (London)",    value="Europe/London"),
+        questionary.Choice("Central EU  (Paris/Berlin)", value="Europe/Paris"),
+        questionary.Choice("Eastern EU  (Helsinki)",  value="Europe/Helsinki"),
+        questionary.Choice("Moscow",                  value="Europe/Moscow"),
+        questionary.Separator("── Asia / Pacific ──"),
+        questionary.Choice("India       (Kolkata)",   value="Asia/Kolkata"),
+        questionary.Choice("China       (Shanghai)",  value="Asia/Shanghai"),
+        questionary.Choice("Japan       (Tokyo)",     value="Asia/Tokyo"),
+        questionary.Choice("Korea       (Seoul)",     value="Asia/Seoul"),
+        questionary.Choice("Australia   (Sydney)",    value="Australia/Sydney"),
+        questionary.Choice("New Zealand (Auckland)",  value="Pacific/Auckland"),
+        questionary.Separator("── Middle East / Africa ──"),
+        questionary.Choice("UAE         (Dubai)",     value="Asia/Dubai"),
+        questionary.Choice("Israel      (Jerusalem)", value="Asia/Jerusalem"),
+        questionary.Choice("South Africa (Johannesburg)", value="Africa/Johannesburg"),
+    ]
+    current_tz = collected.get("REFRESH_TIMEZONE", "UTC")
+    default_choice = next(
+        (c for c in _TZ_CHOICES if isinstance(c, questionary.Choice) and c.value == current_tz),
+        _TZ_CHOICES[0],
+    )
+    tz = questionary.select(
+        "Timezone for the Friday refresh",
+        choices=_TZ_CHOICES,
+        default=default_choice,
+        style=QUESTIONARY_STYLE,
     ).ask()
     if tz is None:
         _cancelled()
-    collected["REFRESH_TIMEZONE"] = tz.strip() or "UTC"
+    collected["REFRESH_TIMEZONE"] = tz
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +631,7 @@ def _print_summary(collected: dict) -> None:
         if val is None:
             continue
         if key in _SECRET_KEYS and len(val) > 8:
-            display = val[:4] + "…" + val[-4:]
+            display = val[:4] + "..." + val[-4:]
         else:
             display = val
         lines.append(f"  [dim]{label:<28}[/dim] {display}")
@@ -688,7 +649,6 @@ def _print_summary(collected: dict) -> None:
 
 def run() -> None:
     env_path = Path(find_dotenv(usecwd=True) or ".env")
-    # Load existing .env values as defaults
     collected: dict[str, str] = {k: v for k, v in dotenv_values(env_path).items() if v}
 
     # Welcome banner
@@ -699,7 +659,7 @@ def run() -> None:
         expand=False,
     ))
 
-    # Prereqs banner — browser tasks to complete before the wizard
+    # Prereqs banner
     console.print(Panel(
         "[bold]Before you start — have these ready:[/bold]\n\n"
         "  [cyan]Notion integration token[/cyan]  (required)\n"
@@ -715,7 +675,7 @@ def run() -> None:
         title="[bold yellow]Prerequisites[/bold yellow]",
         expand=False,
     ))
-    questionary.press_any_key_to_continue("  Press any key when you're ready…", style=_STYLE).ask()
+    questionary.press_any_key_to_continue("  Press any key when you're ready...", style=QUESTIONARY_STYLE).ask()
 
     try:
         _ask_notion(collected)
@@ -734,7 +694,7 @@ def run() -> None:
     _print_summary(collected)
     console.print()
 
-    confirm = questionary.confirm("Write to .env?", default=True, style=_STYLE).ask()
+    confirm = questionary.confirm("Write to .env?", default=True, style=QUESTIONARY_STYLE).ask()
     if not confirm:
         _cancelled()
 
@@ -757,7 +717,12 @@ def run() -> None:
     ))
     console.print()
 
-    # Auto-run doctor so the user sees verification results immediately
-    console.print("[bold]Verifying connections…[/bold]\n")
+    # Reload .env into os.environ before running checks so doctor sees the
+    # values just written, not the stale values from process startup.
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+
+    # Auto-run doctor
+    console.print("[bold]Verifying connections...[/bold]\n")
     from .doctor import run as doctor_run
     doctor_run()

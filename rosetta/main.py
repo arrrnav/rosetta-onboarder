@@ -5,7 +5,7 @@ Install the package with ``pip install -e .`` then run:
 
     rosetta setup                         — interactive first-run configuration wizard
     rosetta settings                      — view and edit agent & refresh settings
-    rosetta serve                         — start the Slack bot + Notion webhook listener
+    rosetta serve                         — start the Slack bot + background poller (+ optional webhook listener)
     rosetta onboard                       — add a new hire to the queue interactively
     rosetta onboard <row-id>              — manually trigger wiki generation for a DB row
     rosetta refresh [--light]            — manually trigger a wiki refresh for all Done hires
@@ -31,13 +31,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 from pathlib import Path
 
 import typer
 from dotenv import load_dotenv
-from rich.console import Console
-from rich.logging import RichHandler
+
+from .cli_helpers import VERBOSE_LOGGING, console, require_env, setup_logging
+from .config import DATA_DIR, DEFAULT_MODEL, STATUS_STYLES
 
 app = typer.Typer(
     name="rosetta",
@@ -46,34 +46,6 @@ app = typer.Typer(
     rich_markup_mode="rich",
     epilog="[bold]First time?[/bold]  [cyan]rosetta setup[/cyan]  →  [cyan]rosetta settings[/cyan]  →  [cyan]rosetta serve[/cyan]",
 )
-console = Console()
-
-# Set to True to show internal debug output and HTTP access logs.
-# Can also be enabled by setting LOG_LEVEL=DEBUG in your .env.
-VERBOSE_LOGGING = False
-
-
-def _setup_logging() -> None:
-    if VERBOSE_LOGGING or os.getenv("LOG_LEVEL", "").upper() in ("DEBUG", "INFO"):
-        level = os.getenv("LOG_LEVEL", "INFO").upper()
-    else:
-        level = "WARNING"
-    logging.basicConfig(
-        level=getattr(logging, level, logging.WARNING),
-        format="%(message)s",
-        datefmt="[%X]",
-        handlers=[RichHandler(console=console, rich_tracebacks=True, show_path=False)],
-    )
-
-
-def _require_env(key: str) -> str:
-    """Read a required environment variable, print a clear error and exit if missing."""
-    value = os.environ.get(key)
-    if not value:
-        console.print(f"[bold red]Error:[/bold red] {key} is not set. "
-                      f"Add it to your .env file.")
-        raise typer.Exit(code=1)
-    return value
 
 
 # ---------------------------------------------------------------------------
@@ -99,51 +71,6 @@ def setup() -> None:
 # settings command
 # ---------------------------------------------------------------------------
 
-_SETTINGS: list[dict] = [
-    {
-        "key":     "CLAUDE_MODEL",
-        "label":   "Claude model",
-        "type":    "select",
-        "choices": [
-            "claude-sonnet-4-5",
-            "claude-haiku-4-5-20251001",
-            "claude-opus-4-5",
-        ],
-        "default": "claude-haiku-4-5-20251001",
-    },
-    {
-        "key":     "GITHUB_MAX_ISSUES",
-        "label":   "Max GitHub issues fetched per repo",
-        "type":    "int",
-        "default": "10",
-    },
-    {
-        "key":     "GITHUB_MAX_PRS",
-        "label":   "Max GitHub PRs fetched per repo",
-        "type":    "int",
-        "default": "5",
-    },
-    {
-        "key":     "GITHUB_TREE_DEPTH",
-        "label":   "GitHub repo tree depth",
-        "type":    "int",
-        "default": "2",
-    },
-    {
-        "key":     "REFRESH_ENABLED",
-        "label":   "Scheduled Friday refresh",
-        "type":    "bool",
-        "default": "false",
-    },
-    {
-        "key":     "REFRESH_TIMEZONE",
-        "label":   "Refresh timezone",
-        "type":    "text",
-        "default": "UTC",
-    },
-]
-
-
 @app.command()
 def settings() -> None:
     """
@@ -152,91 +79,10 @@ def settings() -> None:
     Covers Claude model, GitHub fetch limits, and the scheduled refresh
     schedule.  Writes changes to .env in the project root.
     """
-    import questionary
-    from dotenv import dotenv_values, find_dotenv, set_key
-
     load_dotenv()
-    env_path = Path(find_dotenv(usecwd=True) or ".env")
-    current = {k: v for k, v in dotenv_values(env_path).items() if v}
 
-    style = questionary.Style([
-        ("qmark",       "fg:#00d7ff bold"),
-        ("question",    "bold"),
-        ("answer",      "fg:#00ff87 bold"),
-        ("pointer",     "fg:#00d7ff bold"),
-        ("highlighted", "fg:#00d7ff bold"),
-        ("selected",    "fg:#00ff87"),
-        ("instruction", "fg:#555555"),
-    ])
-
-    console.print("\n[bold]Agent & refresh settings[/bold]  [dim](Enter to keep current value)[/dim]\n")
-
-    updated: dict[str, str] = {}
-
-    for s in _SETTINGS:
-        key      = s["key"]
-        label    = s["label"]
-        kind     = s["type"]
-        fallback = s["default"]
-        cur      = current.get(key, fallback)
-
-        if kind == "select":
-            choices = s["choices"]
-            # put current value first so it's the default selection
-            ordered = [cur] + [c for c in choices if c != cur]
-            val = questionary.select(label, choices=ordered, style=style).ask()
-            if val is None:
-                console.print("\n[dim]Cancelled — .env was not changed.[/dim]\n")
-                raise typer.Exit()
-
-        elif kind == "bool":
-            val_bool = questionary.confirm(
-                label,
-                default=(cur.lower() == "true"),
-                style=style,
-            ).ask()
-            if val_bool is None:
-                console.print("\n[dim]Cancelled — .env was not changed.[/dim]\n")
-                raise typer.Exit()
-            val = "true" if val_bool else "false"
-
-        else:  # text or int
-            val = questionary.text(label, default=cur, style=style).ask()
-            if val is None:
-                console.print("\n[dim]Cancelled — .env was not changed.[/dim]\n")
-                raise typer.Exit()
-            val = val.strip() or cur
-            if kind == "int":
-                try:
-                    int(val)
-                except ValueError:
-                    console.print(f"  [red]✗[/red]  {val!r} is not a valid integer — keeping {cur}")
-                    val = cur
-
-        if val != cur:
-            updated[key] = val
-
-    if not updated:
-        console.print("\n[dim]No changes.[/dim]\n")
-        return
-
-    console.print()
-    for key, val in updated.items():
-        label = next(s["label"] for s in _SETTINGS if s["key"] == key)
-        old   = current.get(key, next(s["default"] for s in _SETTINGS if s["key"] == key))
-        console.print(f"  [green]✔[/green]  {label}: [dim]{old}[/dim] → [bold]{val}[/bold]")
-
-    console.print()
-    confirm = questionary.confirm("Save to .env?", default=True, style=style).ask()
-    if not confirm:
-        console.print("[dim]Cancelled — .env was not changed.[/dim]\n")
-        return
-
-    env_path.touch(exist_ok=True)
-    for key, val in updated.items():
-        set_key(str(env_path), key, val)
-
-    console.print("[bold green]Saved.[/bold green]\n")
+    from .settings_manager import prompt_and_save
+    prompt_and_save()
 
 
 # ---------------------------------------------------------------------------
@@ -256,10 +102,10 @@ def serve(
 
         ngrok http 8000
 
-    Then set WEBHOOK_PUBLIC_URL to the ngrok URL via rosetta setup.
+    Then register the URL in your Notion integration dashboard.
     """
     load_dotenv()
-    _setup_logging()
+    setup_logging()
 
     try:
         import uvicorn
@@ -337,20 +183,19 @@ def onboard(
     (useful for re-processing or debugging).
     """
     load_dotenv()
-    _setup_logging()
+    setup_logging()
 
-    notion_token = _require_env("NOTION_TOKEN")
+    notion_token = require_env("NOTION_TOKEN")
 
     if row_id is None:
-        # Interactive add-a-hire flow
-        database_id = _require_env("NOTION_DATABASE_ID")
+        database_id = require_env("NOTION_DATABASE_ID")
         asyncio.run(_run_add_hire(notion_token, database_id))
         return
 
-    # Manual trigger (existing behaviour — kept for debugging / re-processing)
-    parent_page_id = _require_env("NOTION_ONBOARDING_PAGE_ID")
+    # Manual trigger
+    parent_page_id = require_env("NOTION_ONBOARDING_PAGE_ID")
     github_token = os.environ.get("GITHUB_TOKEN")
-    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+    model = os.environ.get("CLAUDE_MODEL", DEFAULT_MODEL)
 
     if not github_token:
         console.print("[yellow]Warning:[/yellow] GITHUB_TOKEN not set — "
@@ -409,80 +254,31 @@ async def _run_onboard(
     github_token: str | None,
     model: str,
 ) -> None:
-    """Async implementation of the onboard command."""
-    from .agent import run_onboarding_agent
-    from .github.fetcher import GithubFetcher
-    from .notion.mcp_session import NotionMCPSession
+    """Manual CLI onboard — wraps the shared pipeline with console output."""
+    from .pipeline import run_onboard_pipeline
 
-    fetcher = GithubFetcher(token=github_token)
+    console.print(f"[dim]Fetching row {row_id}...[/dim]")
 
-    async with NotionMCPSession(token=notion_token) as session:
-        # Fetch and validate the DB row
-        console.print(f"[dim]Fetching row {row_id}...[/dim]")
-        try:
-            hire = await session.fetch_hire_row(row_id)
-        except Exception as exc:
-            console.print(f"[bold red]Error:[/bold red] Could not read DB row — {exc}")
-            raise typer.Exit(code=1)
-
-        console.print(
-            f"[bold green]Starting:[/bold green] {hire.name} "
-            f"[dim]({hire.role})[/dim] — "
-            f"{len(hire.repo_urls)} repo(s)"
+    try:
+        result = await run_onboard_pipeline(
+            page_id=row_id,
+            notion_token=notion_token,
+            parent_page_id=parent_page_id,
+            github_token=github_token,
+            model=model,
+            on_status=None,  # skip status guard for manual trigger
         )
-        for url in hire.repo_urls:
-            console.print(f"  [dim]{url}[/dim]")
+    except Exception as exc:
+        console.print(f"[bold red]Error during generation:[/bold red] {exc}")
+        raise typer.Exit(code=1)
 
-        # Mark as Processing so the poller (M3) doesn't pick it up again
-        await session.update_hire_row(row_id, "Processing")
+    if result is None:
+        console.print("[yellow]Warning:[/yellow] Row was skipped (empty name or invalid status).")
+        return
 
-        try:
-            wiki_url, wiki_page_id, wiki = await run_onboarding_agent(
-                hire=hire,
-                fetcher=fetcher,
-                notion_session=session,
-                parent_page_id=parent_page_id,
-                model=model,
-            )
-        except Exception as exc:
-            # Roll back to Ready so the team lead can retry
-            console.print(f"[bold red]Error during generation:[/bold red] {exc}")
-            logging.getLogger(__name__).exception("Agent failed for %s", hire.name)
-            await session.update_hire_row(row_id, "Ready")
-            raise typer.Exit(code=1)
-
-        # Write results back to the DB row
-        await session.update_hire_row(row_id, "Done", wiki_url=wiki_url)
-        console.print(f"\n[bold green]Done![/bold green] Wiki created for {hire.name}")
-        console.print(f"  {wiki_url}")
-
-        # -- Milestone 2: index wiki for chat RAG --
-        gemini_key = os.environ.get("GEMINI_API_KEY")
-        if gemini_key:
-            from .embeddings import index_wiki
-            data_dir = Path("data")
-            # Collect README image URLs from all repos for multimodal embedding
-            image_urls: list[str] = []
-            for repo_url in hire.repo_urls:
-                try:
-                    image_urls.extend(fetcher.get_image_urls_from_readme(repo_url))
-                except Exception:
-                    pass
-            console.print("[dim]Indexing wiki for chat RAG…[/dim]")
-            try:
-                index_wiki(wiki, wiki_page_id, data_dir, image_urls=image_urls)
-                console.print("[dim]Embeddings saved.[/dim]")
-            except Exception as exc:
-                console.print(f"[yellow]Warning:[/yellow] Embedding failed — {exc}")
-                console.print("[dim]Chat will be unavailable for this wiki.[/dim]")
-        else:
-            console.print(
-                "[yellow]Note:[/yellow] GEMINI_API_KEY not set — skipping chat indexing."
-            )
-
-        # -- Milestone 4: notify the new hire --
-        from .notify import notify_hire
-        notify_hire(hire, wiki_url, wiki_page_id=wiki_page_id)
+    wiki_url, wiki_page_id, _wiki = result
+    console.print(f"\n[bold green]Done![/bold green] Wiki created")
+    console.print(f"  {wiki_url}")
 
 
 # ---------------------------------------------------------------------------
@@ -507,19 +303,17 @@ def refresh(
     Reads NOTION_TOKEN, NOTION_DATABASE_ID, and NOTION_ONBOARDING_PAGE_ID from .env.
     """
     load_dotenv()
-    _setup_logging()
+    setup_logging()
 
-    notion_token = _require_env("NOTION_TOKEN")
-    database_id = _require_env("NOTION_DATABASE_ID")
-    parent_page_id = _require_env("NOTION_ONBOARDING_PAGE_ID")
-    github_token = os.environ.get("GITHUB_TOKEN")
-    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
-    data_dir = Path("data")
+    notion_token = require_env("NOTION_TOKEN")
+    database_id = require_env("NOTION_DATABASE_ID")
+    parent_page_id = require_env("NOTION_ONBOARDING_PAGE_ID")
+    model = os.environ.get("CLAUDE_MODEL", DEFAULT_MODEL)
 
     refresh_type = "light" if light else "full"
     console.print(f"[bold green]Starting {refresh_type} refresh for all Done hires...[/bold green]")
 
-    asyncio.run(_run_refresh(light, notion_token, database_id, parent_page_id, model, data_dir))
+    asyncio.run(_run_refresh(light, notion_token, database_id, parent_page_id, model))
 
 
 async def _run_refresh(
@@ -528,7 +322,6 @@ async def _run_refresh(
     database_id: str,
     parent_page_id: str,
     model: str,
-    data_dir: Path,
 ) -> None:
     """Async implementation of the refresh command."""
     from .scheduler import _do_refresh
@@ -537,7 +330,7 @@ async def _run_refresh(
         notion_token=notion_token,
         data_source_id=database_id,
         parent_page_id=parent_page_id,
-        data_dir=data_dir,
+        data_dir=DATA_DIR,
         model=model,
     )
 
@@ -570,10 +363,10 @@ def ls_command() -> None:
     List all entries in the New Hire Requests database with their current status.
     """
     load_dotenv()
-    _setup_logging()
+    setup_logging()
 
-    notion_token = _require_env("NOTION_TOKEN")
-    database_id = _require_env("NOTION_DATABASE_ID")
+    notion_token = require_env("NOTION_TOKEN")
+    database_id = require_env("NOTION_DATABASE_ID")
 
     asyncio.run(_run_ls(notion_token, database_id))
 
@@ -589,13 +382,6 @@ async def _run_ls(notion_token: str, database_id: str) -> None:
         console.print("[dim]No hires found in the database.[/dim]")
         return
 
-    _STATUS_STYLE = {
-        "Done": "green",
-        "Ready": "yellow",
-        "Processing": "blue",
-        "Pending": "dim",
-    }
-
     table = Table(title=f"New Hire Requests — {len(rows)} row{'s' if len(rows) != 1 else ''}")
     table.add_column("Name", style="bold")
     table.add_column("Role")
@@ -603,12 +389,11 @@ async def _run_ls(notion_token: str, database_id: str) -> None:
     table.add_column("Wiki")
 
     for hire, status, wiki_url in rows:
-        style = _STATUS_STYLE.get(status, "")
+        style = STATUS_STYLES.get(status, "")
         status_cell = f"[{style}]{status}[/{style}]" if style else status
         wiki_cell = wiki_url if wiki_url else "[dim]—[/dim]"
-        # Truncate long wiki URLs to keep the table tidy
         if len(wiki_cell) > 60:
-            wiki_cell = wiki_cell[:57] + "…"
+            wiki_cell = wiki_cell[:57] + "..."
         table.add_row(hire.name, hire.role or "—", status_cell, wiki_cell)
 
     console.print(table)

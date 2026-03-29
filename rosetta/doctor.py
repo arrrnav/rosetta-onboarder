@@ -27,6 +27,14 @@ class _Result(NamedTuple):
     detail: str
 
 
+def _to_uuid(raw_id: str) -> str:
+    """Normalise a 32-char hex string to a dashed UUID."""
+    clean = raw_id.replace("-", "")
+    if len(clean) == 32:
+        return f"{clean[:8]}-{clean[8:12]}-{clean[12:16]}-{clean[16:20]}-{clean[20:]}"
+    return raw_id
+
+
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
@@ -50,11 +58,7 @@ def _check_notion_token(token: str) -> _Result:
 
 def _check_notion_page(token: str, page_id: str, label: str) -> _Result:
     try:
-        clean = page_id.replace("-", "")
-        if len(clean) == 32:
-            uuid = f"{clean[:8]}-{clean[8:12]}-{clean[12:16]}-{clean[16:20]}-{clean[20:]}"
-        else:
-            uuid = page_id
+        uuid = _to_uuid(page_id)
         resp = httpx.get(
             f"{_NOTION_API}/pages/{uuid}",
             headers={"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"},
@@ -76,11 +80,7 @@ def _check_notion_page(token: str, page_id: str, label: str) -> _Result:
 
 def _check_notion_database(token: str, db_id: str, label: str) -> _Result:
     try:
-        clean = db_id.replace("-", "")
-        if len(clean) == 32:
-            uuid = f"{clean[:8]}-{clean[8:12]}-{clean[12:16]}-{clean[16:20]}-{clean[20:]}"
-        else:
-            uuid = db_id
+        uuid = _to_uuid(db_id)
         resp = httpx.post(
             f"{_NOTION_API}/databases/{uuid}/query",
             headers={

@@ -143,7 +143,16 @@ async def start_scheduler(
             except ImportError:
                 from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
 
-            tz = ZoneInfo(os.getenv("REFRESH_TIMEZONE", "UTC"))
+            tz_name = os.getenv("REFRESH_TIMEZONE", "UTC")
+            try:
+                tz = ZoneInfo(tz_name)
+            except Exception:
+                logger.warning(
+                    "[scheduler] Invalid REFRESH_TIMEZONE %r — falling back to UTC. "
+                    "Update it to a valid IANA name (e.g. America/Los_Angeles).",
+                    tz_name,
+                )
+                tz = ZoneInfo("UTC")
             now = datetime.now(tz)
 
             if now.weekday() != 4:  # 4 = Friday

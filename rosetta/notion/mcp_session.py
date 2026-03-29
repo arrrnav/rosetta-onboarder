@@ -25,7 +25,6 @@ from .models import OnboardingInput, WikiPage
 
 logger = logging.getLogger(__name__)
 
-# Notion property types we read from DB rows
 _GITHUB_URL_RE = re.compile(r"https://github\.com/[^\s,]+")
 
 
@@ -65,45 +64,57 @@ class NotionMCPSession:
 
     async def __aexit__(self, *exc_info: Any) -> None:
         if self._session:
-            await self._session.__aexit__(*exc_info)
+            try:
+                await self._session.__aexit__(*exc_info)
+            except Exception:
+                pass  # MCP session teardown errors are not actionable
         if self._cm:
-            await self._cm.__aexit__(*exc_info)
+            try:
+                await self._cm.__aexit__(*exc_info)
+            except RuntimeError as exc:
+                # anyio cancel scope exits in a different task than it was entered in —
+                # a known limitation when the MCP stdio_client is cleaned up outside
+                # its original task context. Safe to ignore.
+                if "cancel scope" not in str(exc).lower():
+                    raise
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # Database queries (shared helper)
+    # ------------------------------------------------------------------
+
+    async def _query_database(
+        self, database_id: str, filter_payload: dict | None = None
+    ) -> list[dict]:
+        """
+        Query a Notion database via httpx (not MCP — avoids API-query-data-source issues).
+
+        Returns the raw ``results`` list of page objects.
+        """
+        import httpx
+        url = f"https://api.notion.com/v1/databases/{database_id}/query"
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+        }
+        body = filter_payload or {}
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(url, headers=headers, json=body)
+        return resp.json().get("results", [])
 
     # ------------------------------------------------------------------
     # Database operations
     # ------------------------------------------------------------------
 
     async def query_pending_hires(self, data_source_id: str) -> list[OnboardingInput]:
-        """
-        Query the New Hire Requests database for rows where Status = 'Ready'.
-
-        Args:
-            data_source_id: The Notion database ID (NOTION_DATABASE_ID in .env).
-
-        Returns a list of fully parsed ``OnboardingInput`` objects. Rows
-        whose ``Name`` property is empty are skipped with a warning (they
-        are likely template/header rows accidentally set to Ready).
-
-        Note: Uses httpx directly instead of the MCP tool — see query_done_hires.
-        """
-        import httpx
-        url = f"https://api.notion.com/v1/databases/{data_source_id}/query"
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "filter": {
-                "property": "Status",
-                "select": {"equals": "Ready"},
-            }
-        }
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, headers=headers, json=payload)
-        raw = resp.json()
+        """Query for rows where Status = 'Ready'."""
+        rows = await self._query_database(data_source_id, {
+            "filter": {"property": "Status", "select": {"equals": "Ready"}}
+        })
         hires = []
-        for row in raw.get("results", []):
+        for row in rows:
             hire = parse_db_row(row)
             if hire.name:
                 hires.append(hire)
@@ -111,22 +122,53 @@ class NotionMCPSession:
                 logger.warning("Skipping DB row %s — no name found", row.get("id"))
         return hires
 
+    async def query_done_hires(
+        self, data_source_id: str
+    ) -> list[tuple[OnboardingInput, str, str]]:
+        """Query for rows where Status = 'Done'. Returns (hire, wiki_url, wiki_page_id)."""
+        rows = await self._query_database(data_source_id, {
+            "filter": {"property": "Status", "select": {"equals": "Done"}}
+        })
+        hires = []
+        for row in rows:
+            hire = parse_db_row(row)
+            if not hire.name:
+                logger.warning("Skipping DB row %s — no name found", row.get("id"))
+                continue
+            wiki_url = _read_prop(row.get("properties", {}), "Wiki URL", "url")
+            if not wiki_url:
+                logger.warning("Skipping %s — no Wiki URL set", hire.name)
+                continue
+            wiki_page_id = _url_to_page_id(wiki_url)
+            if not wiki_page_id:
+                logger.warning("Skipping %s — could not parse wiki page ID from %s", hire.name, wiki_url)
+                continue
+            hires.append((hire, wiki_url, wiki_page_id))
+        return hires
+
+    async def query_all_hires(
+        self, data_source_id: str
+    ) -> list[tuple[OnboardingInput, str, str]]:
+        """Query all rows. Returns (hire, status_name, wiki_url)."""
+        rows = await self._query_database(data_source_id)
+        results = []
+        for row in rows:
+            hire = parse_db_row(row)
+            if not hire.name:
+                continue
+            status = row.get("properties", {}).get("Status", {}).get("select", {})
+            status_name = status.get("name", "Pending") if status else "Pending"
+            wiki_url = _read_prop(row.get("properties", {}), "Wiki URL", "url")
+            results.append((hire, status_name, wiki_url))
+        return results
+
     async def update_hire_row(
         self,
         row_id: str,
         status: str,
         wiki_url: str | None = None,
     ) -> None:
-        """
-        Update the Status (and optionally Wiki URL) properties on a DB row.
-
-        Both writes are sent in a single API-patch-page call to keep the row
-        transition atomic — the team lead's board view always shows a consistent
-        state.  Typical call sequence:
-
-        1. ``update_hire_row(row_id, "Processing")``   — before generation starts
-        2. ``update_hire_row(row_id, "Done", wiki_url)`` — after wiki is created
-        """
+        """Update Status (and optionally Wiki URL) on a DB row."""
         properties: dict[str, Any] = {
             "Status": {"select": {"name": status}},
         }
@@ -135,24 +177,12 @@ class NotionMCPSession:
 
         await self._session.call_tool(
             "API-patch-page",
-            {
-                "page_id": row_id,
-                "properties": properties,
-            },
+            {"page_id": row_id, "properties": properties},
         )
         logger.debug("Updated row %s → Status=%s wiki_url=%s", row_id, status, wiki_url)
 
     async def fetch_hire_row(self, row_id: str) -> OnboardingInput:
-        """
-        Fetch a single DB row by its Notion page ID and parse it into an OnboardingInput.
-
-        Used by the ``onboard <row_id>`` CLI command to process one specific hire
-        without querying the entire database.  The row_id is the page ID of the
-        database entry (the UUID in the Notion page URL).
-
-        API-retrieve-a-page returns the raw Notion REST API JSON, which is parsed
-        by ``parse_db_row`` into an OnboardingInput.
-        """
+        """Fetch a single DB row and parse into OnboardingInput."""
         result = await self._session.call_tool(
             "API-retrieve-a-page",
             {"page_id": row_id},
@@ -167,12 +197,7 @@ class NotionMCPSession:
         return hire
 
     async def fetch_page_status(self, page_id: str) -> str:
-        """Return the current Status select value for a DB row (e.g. 'Ready', 'Done').
-
-        Returns an empty string if the page cannot be fetched or has no Status property.
-        Used by the webhook handler to guard against re-processing rows that are
-        already Processing or Done.
-        """
+        """Return the current Status select value (e.g. 'Ready', 'Done')."""
         try:
             result = await self._session.call_tool(
                 "API-retrieve-a-page",
@@ -192,22 +217,12 @@ class NotionMCPSession:
     # ------------------------------------------------------------------
 
     async def create_wiki_page(self, wiki: WikiPage, parent_page_id: str) -> tuple[str, str]:
-        """Create a Notion page from a WikiPage under the given parent.
-
-        Returns:
-            (url, page_id) — the Notion URL and the raw page ID of the created page.
-            The page_id is needed to append blocks (embed, refresh) and for the chat URL.
-
-        Notion accepts at most 100 children per API call.  We use a batch
-        size of 95 (leaving headroom for the title block) and append the
-        overflow via ``API-patch-block-children``.
-        """
+        """Create a Notion page from a WikiPage. Returns (url, page_id)."""
         BATCH = 95
         blocks = wiki.to_notion_blocks()
         logger.info("Wiki has %d blocks — sending in %d batch(es)",
                      len(blocks), -(-len(blocks) // BATCH))
 
-        # Create the page with the first batch
         result = await self._session.call_tool(
             "API-post-page",
             {
@@ -219,15 +234,18 @@ class NotionMCPSession:
             },
         )
         raw = _extract_json(result)
+        if raw.get("object") == "error":
+            raise RuntimeError(
+                f"Notion API error creating wiki page: {raw.get('message', raw)}"
+            )
         page_id = raw.get("id", "")
         url = raw.get("url", "")
         if not url:
             text = _extract_text(result)
             logger.debug("create_wiki_page result: %s", text[:200])
             url_match = re.search(r"https://www\.notion\.so/\S+", text)
-            url = url_match.group(0) if url_match else text
+            url = url_match.group(0) if url_match else ""
 
-        # Append remaining blocks in batches
         for i in range(BATCH, len(blocks), BATCH):
             batch = blocks[i : i + BATCH]
             logger.info("Appending blocks %d–%d of %d",
@@ -240,7 +258,7 @@ class NotionMCPSession:
         return url, page_id
 
     async def append_embed_block(self, page_id: str, embed_url: str) -> None:
-        """Append an iframe embed block to an existing page (used to add the chat widget)."""
+        """Append an iframe embed block to an existing page."""
         await self._session.call_tool(
             "API-patch-block-children",
             {
@@ -250,84 +268,6 @@ class NotionMCPSession:
                 ],
             },
         )
-
-    async def query_done_hires(
-        self, data_source_id: str
-    ) -> list[tuple[OnboardingInput, str, str]]:
-        """
-        Query the New Hire Requests database for rows where Status = 'Done'.
-
-        Args:
-            data_source_id: The Notion database ID (NOTION_DATABASE_ID in .env).
-
-        Returns a list of (hire, wiki_url, wiki_page_id) tuples. Rows with an
-        empty Name or empty Wiki URL are skipped — they have no wiki to refresh.
-
-        Note: Uses httpx directly instead of the MCP tool because API-query-data-source
-        consistently returns invalid_request_url regardless of parameter format.
-        """
-        import httpx
-        url = f"https://api.notion.com/v1/databases/{data_source_id}/query"
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "filter": {
-                "property": "Status",
-                "select": {"equals": "Done"},
-            }
-        }
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, headers=headers, json=payload)
-        raw = resp.json()
-        hires = []
-        for row in raw.get("results", []):
-            hire = parse_db_row(row)
-            if not hire.name:
-                logger.warning("Skipping DB row %s — no name found", row.get("id"))
-                continue
-            wiki_url = _read_url_prop(row.get("properties", {}), "Wiki URL")
-            if not wiki_url:
-                logger.warning("Skipping %s — no Wiki URL set", hire.name)
-                continue
-            wiki_page_id = _url_to_page_id(wiki_url)
-            if not wiki_page_id:
-                logger.warning("Skipping %s — could not parse wiki page ID from %s", hire.name, wiki_url)
-                continue
-            hires.append((hire, wiki_url, wiki_page_id))
-        return hires
-
-    async def query_all_hires(
-        self, data_source_id: str
-    ) -> list[tuple[OnboardingInput, str, str]]:
-        """
-        Query the New Hire Requests database for all rows regardless of status.
-
-        Returns a list of (hire, status, wiki_url) tuples. Rows with an empty
-        Name are skipped. wiki_url is empty string when not yet set.
-        """
-        import httpx
-        url = f"https://api.notion.com/v1/databases/{data_source_id}/query"
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json",
-        }
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, headers=headers, json={})
-        raw = resp.json()
-        results = []
-        for row in raw.get("results", []):
-            hire = parse_db_row(row)
-            if not hire.name:
-                continue
-            status = row.get("properties", {}).get("Status", {}).get("select", {})
-            status_name = status.get("name", "Pending") if status else "Pending"
-            wiki_url = _read_url_prop(row.get("properties", {}), "Wiki URL")
-            results.append((hire, status_name, wiki_url))
-        return results
 
     async def create_hire_row(
         self,
@@ -339,28 +279,14 @@ class NotionMCPSession:
         contact_email: str = "",
         slack_handle: str = "",
     ) -> str:
-        """
-        Create a new row in the New Hire Requests database with Status=Ready.
-
-        Returns the new page ID so the caller can show a confirmation URL.
-        """
+        """Create a new row with Status=Ready. Returns the new page ID."""
         repos_text = "\n".join(repo_urls)
         properties: dict = {
-            "Name": {
-                "title": [{"text": {"content": name}}]
-            },
-            "Role": {
-                "rich_text": [{"text": {"content": role}}]
-            },
-            "GitHub Repos": {
-                "rich_text": [{"text": {"content": repos_text}}]
-            },
-            "Notes": {
-                "rich_text": [{"text": {"content": notes}}]
-            },
-            "Status": {
-                "select": {"name": "Ready"}
-            },
+            "Name": {"title": [{"text": {"content": name}}]},
+            "Role": {"rich_text": [{"text": {"content": role}}]},
+            "GitHub Repos": {"rich_text": [{"text": {"content": repos_text}}]},
+            "Notes": {"rich_text": [{"text": {"content": notes}}]},
+            "Status": {"select": {"name": "Ready"}},
         }
         if contact_email:
             properties["Contact Email"] = {"email": contact_email}
@@ -369,29 +295,18 @@ class NotionMCPSession:
 
         result = await self._session.call_tool(
             "API-post-page",
-            {
-                "parent": {"database_id": database_id},
-                "properties": properties,
-            },
+            {"parent": {"database_id": database_id}, "properties": properties},
         )
         data = _extract_json(result)
         return data.get("id", "")
 
     async def move_page(self, page_id: str, new_parent_page_id: str) -> None:
-        """Reparent a Notion page (used to archive old wikis to the graveyard page).
-
-        Uses the ``notion-move-pages`` MCP tool rather than ``API-patch-page``
-        because the Notion REST PATCH endpoint does not support changing a
-        page's parent — it silently ignores the ``parent`` field.
-        """
+        """Reparent a Notion page (archive old wikis)."""
         await self._session.call_tool(
             "API-move-page",
             {
                 "page_id": page_id,
-                "parent": {
-                    "type": "page_id",
-                    "page_id": new_parent_page_id,
-                },
+                "parent": {"type": "page_id", "page_id": new_parent_page_id},
             },
         )
         logger.info("Moved page %s → parent %s", page_id, new_parent_page_id)
@@ -399,12 +314,7 @@ class NotionMCPSession:
     async def append_updated_section(
         self, page_id: str, section_heading: str, new_content: str
     ) -> None:
-        """Append refreshed content blocks to a page (used by the refresh command).
-
-        Long content is split into multiple paragraph blocks at line boundaries
-        to stay within Notion's 2000-char-per-block limit without cutting text
-        mid-line.
-        """
+        """Append refreshed content blocks to a page."""
         children: list[dict[str, Any]] = [
             {
                 "object": "block",
@@ -417,7 +327,6 @@ class NotionMCPSession:
             },
         ]
 
-        # Split content into ≤2000-char chunks at line boundaries
         for chunk in _chunk_at_lines(new_content, 2000):
             children.append({
                 "object": "block",
@@ -440,29 +349,17 @@ class NotionMCPSession:
 # ------------------------------------------------------------------
 
 def parse_db_row(row: dict[str, Any]) -> OnboardingInput:
-    """
-    Parse a Notion DB row (as returned by API-retrieve-a-page or API-query-data-source)
-    into an OnboardingInput.
-
-    Expected DB columns:
-        Name        — title property (new hire's full name)
-        Role        — rich_text property (e.g. "Backend Engineer")
-        GitHub Repos — rich_text property (one URL per line, or comma-separated)
-        Notes       — rich_text property (free-form onboarding notes)
-        Status      — select property ("Pending" | "Ready" | "Processing" | "Done")
-        Contact Email — email property (optional)
-        Slack Handle  — rich_text property (optional, e.g. "@jane")
-    """
+    """Parse a Notion DB row into an OnboardingInput."""
     row_id = row.get("id", "")
     props = row.get("properties", {})
 
-    name = _read_title(props, "Name")
-    role = _read_rich_text(props, "Role")
-    notes = _read_rich_text(props, "Notes")
-    repos_raw = _read_rich_text(props, "GitHub Repos")
+    name = _read_prop(props, "Name", "title")
+    role = _read_prop(props, "Role", "rich_text")
+    notes = _read_prop(props, "Notes", "rich_text")
+    repos_raw = _read_prop(props, "GitHub Repos", "rich_text")
     repo_urls = _extract_github_urls(repos_raw)
-    contact_email = _read_email(props, "Contact Email")
-    slack_handle = _read_rich_text(props, "Slack Handle").lstrip("@")
+    contact_email = _read_prop(props, "Contact Email", "email")
+    slack_handle = _read_prop(props, "Slack Handle", "rich_text").lstrip("@")
 
     if not name:
         logger.warning("DB row %s: 'Name' property is empty", row_id)
@@ -483,61 +380,39 @@ def parse_db_row(row: dict[str, Any]) -> OnboardingInput:
 
 
 # ------------------------------------------------------------------
-# Property readers
+# Unified property reader
 # ------------------------------------------------------------------
 
-def _read_title(props: dict[str, Any], key: str) -> str:
+def _read_prop(props: dict[str, Any], key: str, prop_type: str) -> str:
     """
-    Read a Notion title property and return its plain text.
+    Read a Notion property value as a plain string.
 
-    Notion represents all rich-text fields (including titles) as arrays of
-    span objects — e.g. ``[{"plain_text": "Jane"}, {"plain_text": " Smith"}]``.
-    We join all spans because a single visible "word" can be split across
-    multiple spans (e.g. if part of it is bolded or linked).
+    Supports: title, rich_text, email, url.
     """
-    items = props.get(key, {}).get("title", [])
-    return "".join(item.get("plain_text", "") for item in items).strip()
+    prop = props.get(key, {})
+    if prop_type in ("title", "rich_text"):
+        items = prop.get(prop_type, [])
+        return "".join(item.get("plain_text", "") for item in items).strip()
+    if prop_type == "email":
+        return prop.get("email") or ""
+    if prop_type == "url":
+        return prop.get("url") or ""
+    return ""
 
 
-def _read_rich_text(props: dict[str, Any], key: str) -> str:
-    """
-    Read a Notion rich_text property and return its plain text.
-
-    Same span-array behaviour as ``_read_title`` — see that function's
-    docstring for why we join spans rather than taking ``[0]["plain_text"]``.
-    """
-    items = props.get(key, {}).get("rich_text", [])
-    return "".join(item.get("plain_text", "") for item in items).strip()
-
-
-def _read_email(props: dict[str, Any], key: str) -> str:
-    """Read a Notion email property and return the address string, or empty string."""
-    return props.get(key, {}).get("email") or ""
-
-
-def _read_url_prop(props: dict[str, Any], key: str) -> str:
-    """Read a Notion url property and return the URL string, or empty string."""
-    return props.get(key, {}).get("url") or ""
-
+# ------------------------------------------------------------------
+# URL / text helpers
+# ------------------------------------------------------------------
 
 def _url_to_page_id(url: str) -> str:
-    """
-    Extract and reformat a Notion page ID from a Notion URL.
-
-    Notion page URLs end with a 32-char hex string (no hyphens):
-        https://www.notion.so/Title-Of-Page-330f78cab1428192bec1d10cc0c8a578
-    This function extracts that hex string and reformats it as a UUID:
-        330f78ca-b142-8192-bec1-d10cc0c8a578
-    """
+    """Extract a UUID-formatted page ID from a Notion URL."""
     clean = url.split("?")[0].split("#")[0].rstrip("/")
-    # Already UUID-formatted?
     uuid_match = re.search(
         r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
         clean.lower(),
     )
     if uuid_match:
         return uuid_match.group(1)
-    # 32-char hex at end of path
     hex_match = re.search(r"([0-9a-f]{32})$", clean.lower())
     if hex_match:
         h = hex_match.group(1)
@@ -546,10 +421,7 @@ def _url_to_page_id(url: str) -> str:
 
 
 def _chunk_at_lines(text: str, max_size: int) -> list[str]:
-    """Split *text* into chunks of at most *max_size* chars, breaking at newlines.
-
-    If a single line exceeds *max_size* it is hard-split as a last resort.
-    """
+    """Split text into chunks of at most max_size chars, breaking at newlines."""
     chunks: list[str] = []
     current: list[str] = []
     current_len = 0
@@ -559,7 +431,6 @@ def _chunk_at_lines(text: str, max_size: int) -> list[str]:
             chunks.append("".join(current))
             current = []
             current_len = 0
-        # Single line longer than max_size — hard-split
         while len(line) > max_size:
             chunks.append(line[:max_size])
             line = line[max_size:]
@@ -573,8 +444,8 @@ def _chunk_at_lines(text: str, max_size: int) -> list[str]:
 
 
 def _extract_github_urls(text: str) -> list[str]:
-    """Extract all GitHub repo URLs from a block of text."""
-    return list(dict.fromkeys(_GITHUB_URL_RE.findall(text)))  # deduplicate, preserve order
+    """Extract all GitHub repo URLs from text."""
+    return list(dict.fromkeys(_GITHUB_URL_RE.findall(text)))
 
 
 # ------------------------------------------------------------------
@@ -591,13 +462,7 @@ def _extract_text(result: Any) -> str:
 
 
 def _extract_json(result: Any) -> dict[str, Any]:
-    """
-    Parse an MCP tool call result as a JSON dict.
-
-    Logs the first 300 characters of the raw response on failure — enough
-    to diagnose auth errors or unexpected HTML error pages without flooding
-    the log with a full Notion API response body.
-    """
+    """Parse an MCP tool call result as JSON."""
     import json
     text = _extract_text(result)
     try:
