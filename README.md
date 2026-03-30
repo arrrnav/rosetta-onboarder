@@ -1,6 +1,7 @@
 # Rosetta Onboarder
 
-> [!NOTE] 
+![Rosetta Logo](docs/img/rosetta-ai-logo.png)
+
 > Built for the MLH Notion AI Challenge.
 
 Onboarding new engineers is repetitive work. A team lead writes the same wiki every time: here are the repos, here is how to run them, here are the open issues to start with, here is how we review code. The content is different per hire but the structure is always the same — and every piece of it already exists somewhere: in the GitHub README, in the issue tracker, in the PR history.
