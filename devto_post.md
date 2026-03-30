@@ -69,18 +69,24 @@ The agent loop is the core of the system. Claude is given seven tools and runs u
 
 ## 🧠 The Agent Prompt Strategy
 
-The hardest part wasn't the tooling — it was prompt engineering.
+The interesting prompt engineering isn't making the wiki specific — any LLM will do that with basic instructions. The interesting part is **provisioning detection**.
 
-The wiki needs to be *specific*. "See the README for setup instructions" is useless. "Run `docker-compose up` from the `/infra` directory, then copy `.env.example` to `.env` and fill in `DATABASE_URL`" is what a new hire actually needs.
+When a new hire joins, someone needs to figure out what they need access to: which cloud accounts, which databases, which internal tools, which CI/CD secrets. This normally falls on the team lead or engineering manager to mentally reconstruct from memory. Rosetta does it automatically.
 
-The system prompt encodes this explicitly:
+The system prompt instructs Claude to scan the repos for signals even when nothing is explicitly documented:
 
 ```
-Tone: warm, direct, and specific. Avoid generic filler.
-Tailor every section to this person's role and their specific repos.
+Infer from: cloud provider configs or deploy scripts (AWS, GCP, Azure),
+keys in .env.example or README, Docker/container registry references,
+database connection strings or migration files, third-party service
+integrations (Stripe, Twilio, SendGrid, etc.), internal tooling references
+(Datadog, PagerDuty, Sentry, Vault, Jira, LaunchDarkly, etc.),
+VPN or SSH requirements, CI/CD secrets (GitHub Actions, CircleCI, etc.),
+GitHub org-level permissions, and any access requirements explicitly
+listed in the team documentation context.
 ```
 
-For provisioning detection, the prompt instructs Claude to infer access requirements from the codebase even when nothing is explicitly documented — cloud configs, `.env.example` keys, Docker references, DB connection strings, CI/CD secrets. The output goes into an `access_requirements` field on the wiki, which gets forwarded to the supervisor as a Slack DM checklist.
+The output goes into an `access_requirements` field on the wiki and gets forwarded to the supervisor as a Slack DM checklist — without anyone having to think about it.
 
 ---
 
@@ -135,9 +141,17 @@ def retrieve(self, query: str, top_k: int = 3) -> list[str]:
 
 ## 💬 The Slack Bot
 
-Once embedded, the hire can DM the Rosetta Slack bot directly. It resolves their user ID to their wiki's vector store, retrieves the top-3 relevant chunks, and passes them to Claude for answer generation — all within the same Socket Mode connection that runs alongside the FastAPI server.
+The moment the wiki is written, the new hire gets a DM with their wiki link. No email chain, no "check your onboarding doc in Drive" — it lands in Slack where they're already working.
 
-Responses are posted as thread replies to the user's message, so the App Home Chat tab stays readable instead of filling up with standalone message roots.
+*(new hire Slack screenshot)*
+
+From that point on, they can ask the bot anything directly in the DM. It resolves their Slack user ID to their wiki's vector store, retrieves the top-3 relevant chunks by cosine similarity, and generates an answer with Claude — all running inside the same Socket Mode connection as the FastAPI server. No separate process, no public URL required.
+
+The RAG context includes not just the wiki text but also any images embedded from READMEs — so questions like "how does the auth flow work?" can pull from an architecture diagram the same way they'd pull from a paragraph of prose.
+
+Meanwhile, the supervisor gets their own DM — a provisioning checklist inferred by Claude from the repos, sent automatically so nothing slips through the cracks before the hire's first day.
+
+*(manager Slack screenshot)*
 
 ---
 
