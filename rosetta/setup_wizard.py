@@ -51,12 +51,24 @@ _SECRET_KEYS = {"NOTION_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "GEMINI_API
 # Reusable prompt helpers
 # ---------------------------------------------------------------------------
 
+def _mask_value(key: str, value: str) -> str:
+    """Return a display-safe preview of a config value — masked for secrets, truncated otherwise."""
+    if not value:
+        return ""
+    if key in _SECRET_KEYS and len(value) > 8:
+        return value[:4] + "..." + value[-4:]
+    if len(value) > 28:
+        return value[:25] + "..."
+    return value
+
+
 def _prompt_validated_secret(
     label: str,
     validator: callable | None = None,
     *,
     required: bool = False,
     success_template: str = "  [green]✔[/green]  {detail}",
+    existing: str | None = None,
 ) -> str | None:
     """
     Prompt for a secret (password input) with optional live validation.
@@ -71,12 +83,19 @@ def _prompt_validated_secret(
         The validated value, or None if the user provides an empty string
         (and ``required`` is False).
     """
+    display_label = label
+    if existing:
+        masked = existing[:4] + "..." + existing[-4:] if len(existing) > 8 else "***"
+        display_label = f"{label}  (current: {masked} — Enter to keep)"
+
     while True:
-        value = questionary.password(label, style=QUESTIONARY_STYLE).ask()
+        value = questionary.password(display_label, style=QUESTIONARY_STYLE).ask()
         if value is None:
             _cancelled()
         value = value.strip()
         if not value:
+            if existing:
+                return existing
             if required:
                 console.print(f"  [red]{label.split('(')[0].strip()} is required.[/red]")
                 continue
@@ -161,16 +180,18 @@ def _provision_notion_workspace(token: str, parent_page_id: str) -> tuple[str, s
                 "Name":           {"title": {}},
                 "Role":           {"rich_text": {}},
                 "GitHub Repos":   {"rich_text": {}},
-                "Notes":          {"rich_text": {}},
+                "Agent Notes":    {"rich_text": {}},
                 "Status": {"select": {"options": [
                     {"name": "Pending",    "color": "gray"},
                     {"name": "Ready",      "color": "yellow"},
                     {"name": "Processing", "color": "blue"},
                     {"name": "Done",       "color": "green"},
                 ]}},
-                "Wiki URL":       {"url": {}},
-                "Contact Email":  {"email": {}},
-                "Slack Handle":   {"rich_text": {}},
+                "Wiki URL":                {"url": {}},
+                "Contact Email":           {"email": {}},
+                "Slack Handle":            {"rich_text": {}},
+                "Supervisor Slack Handle": {"rich_text": {}},
+                "Context Pages":           {"rich_text": {}},
             },
         })
         if resp.status_code not in (200, 201):
@@ -205,6 +226,7 @@ def _ask_notion(collected: dict) -> None:
         _validate_notion_token,
         required=True,
         success_template="  [green]✔[/green]  Connected to workspace: [bold]{detail}[/bold]",
+        existing=collected.get("NOTION_TOKEN"),
     )
     collected["NOTION_TOKEN"] = token
 
@@ -212,18 +234,27 @@ def _ask_notion(collected: dict) -> None:
 def _ask_notion_workspace(collected: dict) -> None:
     """Step 2: provision or enter Notion resource IDs."""
     console.print()
+    already_set = all(collected.get(k) for k in ("NOTION_ONBOARDING_PAGE_ID", "NOTION_DATABASE_ID"))
+    choices = [
+        questionary.Choice("Create it for me  (recommended)", value="create"),
+        questionary.Choice("I already have one — enter IDs manually", value="manual"),
+    ]
+    if already_set:
+        db_hint = _mask_value("NOTION_DATABASE_ID", collected["NOTION_DATABASE_ID"])
+        choices.insert(0, questionary.Choice(
+            f"Keep existing  (DB: {db_hint})", value="keep"
+        ))
     choice = questionary.select(
         "Set up your Notion workspace?",
-        choices=[
-            questionary.Choice("Create it for me  (recommended)", value="create"),
-            questionary.Choice("I already have one — enter IDs manually", value="manual"),
-        ],
+        choices=choices,
         style=QUESTIONARY_STYLE,
     ).ask()
     if choice is None:
         _cancelled()
 
-    if choice == "create":
+    if choice == "keep":
+        pass
+    elif choice == "create":
         _ask_notion_workspace_create(collected)
     else:
         _ask_notion_ids_manually(collected)
@@ -333,8 +364,10 @@ def _ask_notion_ids_manually(collected: dict) -> None:
         ("Engineering Onboarding page ID", "NOTION_ONBOARDING_PAGE_ID"),
         ("New Hire Requests database ID", "NOTION_DATABASE_ID"),
     ]:
+        existing = collected.get(key, "")
+        display_label = f"{label}  (current: {_mask_value(key, existing)} — Enter to keep)" if existing else label
         while True:
-            raw = questionary.text(label, style=QUESTIONARY_STYLE).ask()
+            raw = questionary.text(display_label, default=existing, style=QUESTIONARY_STYLE).ask()
             if raw is None:
                 _cancelled()
             pid = _parse_notion_id(raw.strip())
@@ -361,6 +394,7 @@ def _ask_anthropic(collected: dict) -> None:
         "Anthropic API key  (console.anthropic.com)",
         required=True,
         success_template="  [green]✔[/green]  Anthropic API key saved",
+        existing=collected.get("ANTHROPIC_API_KEY"),
     )
     collected["ANTHROPIC_API_KEY"] = key
 
@@ -368,16 +402,20 @@ def _ask_anthropic(collected: dict) -> None:
 def _ask_github(collected: dict) -> None:
     """Step 4: GitHub token (optional)."""
     console.print()
-    choice = questionary.select(
-        "Set up GitHub?",
-        choices=[
-            questionary.Choice("Yes — add a personal access token", value="yes"),
-            questionary.Choice("Skip  (60 req/hour, public repos only)", value="skip"),
-        ],
-        style=QUESTIONARY_STYLE,
-    ).ask()
+    existing = collected.get("GITHUB_TOKEN")
+    choices = [
+        questionary.Choice("Yes — add a personal access token", value="yes"),
+        questionary.Choice("Skip  (60 req/hour, public repos only)", value="skip"),
+    ]
+    if existing:
+        choices.insert(0, questionary.Choice(
+            f"Keep existing  ({_mask_value('GITHUB_TOKEN', existing)})", value="keep"
+        ))
+    choice = questionary.select("Set up GitHub?", choices=choices, style=QUESTIONARY_STYLE).ask()
     if choice is None:
         _cancelled()
+    if choice == "keep":
+        return
     if choice == "skip":
         collected.pop("GITHUB_TOKEN", None)
         return
@@ -387,6 +425,7 @@ def _ask_github(collected: dict) -> None:
         _validate_github_token,
         required=True,
         success_template="  [green]✔[/green]  Authenticated as [bold]{detail}[/bold]",
+        existing=existing,
     )
     if token:
         collected["GITHUB_TOKEN"] = token
@@ -395,53 +434,66 @@ def _ask_github(collected: dict) -> None:
 def _ask_gemini(collected: dict) -> None:
     """Step 5: Gemini API key (optional)."""
     console.print()
+    existing = collected.get("GEMINI_API_KEY")
+    choices = [
+        questionary.Choice("Yes — add a Gemini API key", value="yes"),
+        questionary.Choice("Skip — Slack bot will run without wiki Q&A", value="skip"),
+    ]
+    if existing:
+        choices.insert(0, questionary.Choice(
+            f"Keep existing  ({_mask_value('GEMINI_API_KEY', existing)})", value="keep"
+        ))
     choice = questionary.select(
         "Set up Gemini?  (embeds wikis for RAG — lets the Slack bot answer questions about repos)",
-        choices=[
-            questionary.Choice("Yes — add a Gemini API key", value="yes"),
-            questionary.Choice("Skip — Slack bot will run without wiki Q&A", value="skip"),
-        ],
+        choices=choices,
         style=QUESTIONARY_STYLE,
     ).ask()
     if choice is None:
         _cancelled()
+    if choice == "keep":
+        return
     if choice == "skip":
         collected.pop("GEMINI_API_KEY", None)
         return
 
-    key = questionary.password(
+    key = _prompt_validated_secret(
         "Gemini API key  (aistudio.google.com)",
-        style=QUESTIONARY_STYLE,
-    ).ask()
-    if key is None:
-        _cancelled()
-    if key.strip():
-        collected["GEMINI_API_KEY"] = key.strip()
+        existing=existing,
+    )
+    if key:
+        collected["GEMINI_API_KEY"] = key
 
 
 def _ask_slack(collected: dict) -> None:
     """Step 6: Slack (optional)."""
     console.print()
+    existing_bot = collected.get("SLACK_BOT_TOKEN")
+    existing_app = collected.get("SLACK_APP_TOKEN")
+    choices = [
+        questionary.Choice("Yes — configure Slack", value="yes"),
+        questionary.Choice("Skip", value="skip"),
+    ]
+    if existing_bot:
+        choices.insert(0, questionary.Choice(
+            f"Keep existing  (bot: {_mask_value('SLACK_BOT_TOKEN', existing_bot)})", value="keep"
+        ))
     choice = questionary.select(
         "Set up Slack notifications?",
-        choices=[
-            questionary.Choice("Yes — configure Slack", value="yes"),
-            questionary.Choice("Skip", value="skip"),
-        ],
+        choices=choices,
         style=QUESTIONARY_STYLE,
     ).ask()
     if choice is None:
         _cancelled()
+    if choice == "keep":
+        return
     if choice == "skip":
         for k in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"):
             collected.pop(k, None)
         return
 
-    bot = questionary.password("Slack bot token  (xoxb-...)", style=QUESTIONARY_STYLE).ask()
-    if bot is None:
-        _cancelled()
-    if bot.strip():
-        collected["SLACK_BOT_TOKEN"] = bot.strip()
+    bot = _prompt_validated_secret("Slack bot token  (xoxb-...)", existing=existing_bot)
+    if bot:
+        collected["SLACK_BOT_TOKEN"] = bot
 
     gemini_configured = bool(collected.get("GEMINI_API_KEY"))
     if gemini_configured:
@@ -461,11 +513,9 @@ def _ask_slack(collected: dict) -> None:
         )
         app_tok_prompt = "Slack app-level token  (xapp-... leave blank to skip)"
 
-    app_tok = questionary.password(app_tok_prompt, style=QUESTIONARY_STYLE).ask()
-    if app_tok is None:
-        _cancelled()
-    if app_tok.strip():
-        collected["SLACK_APP_TOKEN"] = app_tok.strip()
+    app_tok = _prompt_validated_secret(app_tok_prompt, existing=existing_app)
+    if app_tok:
+        collected["SLACK_APP_TOKEN"] = app_tok
     elif gemini_configured:
         console.print(
             "  [yellow]Warning:[/yellow] Gemini is set up but the app-level token was skipped —\n"
@@ -501,19 +551,28 @@ _SMTP_PROVIDER_NOTES = {
 def _ask_smtp(collected: dict) -> None:
     """Step 7: SMTP email notifications (optional)."""
     console.print()
+    existing_host = collected.get("SMTP_HOST")
+    existing_user = collected.get("SMTP_USER")
+    choices = [
+        questionary.Choice("Gmail",              value="gmail"),
+        questionary.Choice("Outlook / Hotmail",  value="outlook"),
+        questionary.Choice("SendGrid",           value="sendgrid"),
+        questionary.Choice("Other SMTP server",  value="other"),
+        questionary.Choice("Skip",               value="skip"),
+    ]
+    if existing_host and existing_user:
+        choices.insert(0, questionary.Choice(
+            f"Keep existing  ({existing_user} via {existing_host})", value="keep"
+        ))
     provider = questionary.select(
         "Set up email notifications?",
-        choices=[
-            questionary.Choice("Gmail",              value="gmail"),
-            questionary.Choice("Outlook / Hotmail",  value="outlook"),
-            questionary.Choice("SendGrid",           value="sendgrid"),
-            questionary.Choice("Other SMTP server",  value="other"),
-            questionary.Choice("Skip",               value="skip"),
-        ],
+        choices=choices,
         style=QUESTIONARY_STYLE,
     ).ask()
     if provider is None:
         _cancelled()
+    if provider == "keep":
+        return
     if provider == "skip":
         for k in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD"):
             collected.pop(k, None)
@@ -524,29 +583,27 @@ def _ask_smtp(collected: dict) -> None:
     if note:
         console.print(f"\n  [dim]{note}[/dim]")
 
-    host = questionary.text("SMTP host", default=host_default, style=QUESTIONARY_STYLE).ask()
+    host = questionary.text("SMTP host", default=existing_host or host_default, style=QUESTIONARY_STYLE).ask()
     if host is None:
         _cancelled()
     collected["SMTP_HOST"] = host.strip() or host_default
 
-    port = questionary.text("SMTP port", default=port_default, style=QUESTIONARY_STYLE).ask()
+    port = questionary.text("SMTP port", default=collected.get("SMTP_PORT") or port_default, style=QUESTIONARY_STYLE).ask()
     if port is None:
         _cancelled()
     collected["SMTP_PORT"] = port.strip() or port_default
 
     user_prompt = "SendGrid username  (literally: apikey)" if provider == "sendgrid" else "Your email address"
-    user = questionary.text(user_prompt, style=QUESTIONARY_STYLE).ask()
+    user = questionary.text(user_prompt, default=existing_user or "", style=QUESTIONARY_STYLE).ask()
     if user is None:
         _cancelled()
     if user.strip():
         collected["SMTP_USER"] = user.strip()
 
     pw_prompt = "SendGrid API key" if provider == "sendgrid" else "App password" if provider in ("gmail", "outlook") else "SMTP password"
-    pw = questionary.password(pw_prompt, style=QUESTIONARY_STYLE).ask()
-    if pw is None:
-        _cancelled()
-    if pw.strip():
-        collected["SMTP_PASSWORD"] = pw.strip()
+    pw = _prompt_validated_secret(pw_prompt, existing=collected.get("SMTP_PASSWORD"))
+    if pw:
+        collected["SMTP_PASSWORD"] = pw
 
 
 def _ask_refresh(collected: dict) -> None:

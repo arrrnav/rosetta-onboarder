@@ -278,6 +278,8 @@ class NotionMCPSession:
         notes: str = "",
         contact_email: str = "",
         slack_handle: str = "",
+        supervisor_slack: str = "",
+        context_pages: str = "",
     ) -> str:
         """Create a new row with Status=Ready. Returns the new page ID."""
         repos_text = "\n".join(repo_urls)
@@ -285,13 +287,17 @@ class NotionMCPSession:
             "Name": {"title": [{"text": {"content": name}}]},
             "Role": {"rich_text": [{"text": {"content": role}}]},
             "GitHub Repos": {"rich_text": [{"text": {"content": repos_text}}]},
-            "Notes": {"rich_text": [{"text": {"content": notes}}]},
+            "Agent Notes": {"rich_text": [{"text": {"content": notes}}]},
             "Status": {"select": {"name": "Ready"}},
         }
         if contact_email:
             properties["Contact Email"] = {"email": contact_email}
         if slack_handle:
             properties["Slack Handle"] = {"rich_text": [{"text": {"content": slack_handle}}]}
+        if supervisor_slack:
+            properties["Supervisor Slack Handle"] = {"rich_text": [{"text": {"content": supervisor_slack}}]}
+        if context_pages:
+            properties["Context Pages"] = {"rich_text": [{"text": {"content": context_pages}}]}
 
         result = await self._session.call_tool(
             "API-post-page",
@@ -343,6 +349,39 @@ class NotionMCPSession:
             {"block_id": page_id, "children": children},
         )
 
+    async def fetch_notion_page_text(self, page_id: str, max_chars: int = 8000) -> str:
+        """
+        Fetch a Notion page's block content and return it as plain text.
+
+        Paginates through all blocks, converts each to text via ``_block_to_text``,
+        and truncates the result at ``max_chars`` to keep token usage bounded.
+        """
+        import httpx
+        url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Notion-Version": "2022-06-28",
+        }
+        parts: list[str] = []
+        cursor: str | None = None
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            while True:
+                params: dict = {"page_size": 100}
+                if cursor:
+                    params["start_cursor"] = cursor
+                resp = await client.get(url, headers=headers, params=params)
+                data = resp.json()
+                for block in data.get("results", []):
+                    text = _block_to_text(block)
+                    if text:
+                        parts.append(text)
+                if not data.get("has_more"):
+                    break
+                cursor = data.get("next_cursor")
+
+        return "\n".join(parts)[:max_chars]
+
 
 # ------------------------------------------------------------------
 # DB row parser
@@ -355,11 +394,24 @@ def parse_db_row(row: dict[str, Any]) -> OnboardingInput:
 
     name = _read_prop(props, "Name", "title")
     role = _read_prop(props, "Role", "rich_text")
-    notes = _read_prop(props, "Notes", "rich_text")
+    notes = _read_prop(props, "Agent Notes", "rich_text")
     repos_raw = _read_prop(props, "GitHub Repos", "rich_text")
     repo_urls = _extract_github_urls(repos_raw)
     contact_email = _read_prop(props, "Contact Email", "email")
     slack_handle = _read_prop(props, "Slack Handle", "rich_text").lstrip("@")
+    supervisor_slack = _read_prop(props, "Supervisor Slack Handle", "rich_text").lstrip("@")
+    context_pages_raw = _read_prop(props, "Context Pages", "rich_text")
+    context_page_ids = _extract_notion_page_ids(context_pages_raw)
+    if context_pages_raw and not context_page_ids:
+        logger.warning(
+            "DB row %s: 'Context Pages' has text but no Notion URLs could be parsed: %r",
+            row_id, context_pages_raw[:200],
+        )
+    elif context_page_ids:
+        logger.debug(
+            "DB row %s: parsed %d context page ID(s): %s",
+            row_id, len(context_page_ids), context_page_ids,
+        )
 
     if not name:
         logger.warning("DB row %s: 'Name' property is empty", row_id)
@@ -376,6 +428,8 @@ def parse_db_row(row: dict[str, Any]) -> OnboardingInput:
         db_row_id=row_id,
         contact_email=contact_email,
         slack_handle=slack_handle,
+        supervisor_slack=supervisor_slack,
+        context_page_ids=context_page_ids,
     )
 
 
@@ -446,6 +500,38 @@ def _chunk_at_lines(text: str, max_size: int) -> list[str]:
 def _extract_github_urls(text: str) -> list[str]:
     """Extract all GitHub repo URLs from text."""
     return list(dict.fromkeys(_GITHUB_URL_RE.findall(text)))
+
+
+def _extract_notion_page_ids(text: str) -> list[str]:
+    """Extract Notion page IDs from text containing notion.so URLs."""
+    urls = re.findall(r"https://www\.notion\.so/\S+", text)
+    ids = []
+    for url in urls:
+        page_id = _url_to_page_id(url)
+        if page_id:
+            ids.append(page_id)
+    return list(dict.fromkeys(ids))
+
+
+def _block_to_text(block: dict) -> str:
+    """Convert a single Notion block to a plain-text string."""
+    block_type = block.get("type", "")
+    content = block.get(block_type, {})
+    rich_text = content.get("rich_text", [])
+    text = "".join(span.get("plain_text", "") for span in rich_text).strip()
+
+    if not text:
+        return ""
+    if block_type in ("heading_1", "heading_2", "heading_3"):
+        return f"## {text}"
+    if block_type in ("bulleted_list_item", "numbered_list_item"):
+        return f"- {text}"
+    if block_type == "code":
+        lang = content.get("language", "")
+        return f"```{lang}\n{text}\n```"
+    if block_type == "quote":
+        return f"> {text}"
+    return text
 
 
 # ------------------------------------------------------------------

@@ -107,6 +107,7 @@ async def _process_event(
 
     user_id = event.get("user", "")
     channel = event.get("channel", "")
+    thread_ts = event.get("ts", "")  # reply in-thread so App Home Chat stays tidy
     question = event.get("text", "").strip()
 
     if not question:
@@ -119,6 +120,7 @@ async def _process_event(
     if not wiki_page_id:
         await web_client.chat_postMessage(
             channel=channel,
+            thread_ts=thread_ts,
             text=(
                 "I don't have an onboarding wiki linked to your account yet. "
                 "Ask your team lead to generate one for you."
@@ -131,13 +133,15 @@ async def _process_event(
     if not pkl_path.exists():
         await web_client.chat_postMessage(
             channel=channel,
+            thread_ts=thread_ts,
             text="Your wiki exists but the chat index isn't ready yet. Try again in a minute.",
         )
         return
 
-    # Post placeholder while processing
+    # Post placeholder while processing, as a thread reply to the user's message
     placeholder = await web_client.chat_postMessage(
         channel=channel,
+        thread_ts=thread_ts,
         text="_Rosetta is thinking..._",
     )
     placeholder_ts = placeholder["ts"]

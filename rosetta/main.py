@@ -223,6 +223,16 @@ async def _run_add_hire(notion_token: str, database_id: str) -> None:
     notes = typer.prompt("  Extra context for the agent (optional)", default="", show_default=False)
     email = typer.prompt("  Contact email (optional)", default="", show_default=False)
     slack = typer.prompt("  Slack handle (optional, e.g. @jane)", default="", show_default=False)
+    supervisor = typer.prompt("  Supervisor Slack handle (optional, e.g. @manager)", default="", show_default=False)
+
+    console.print("  Notion context page URLs [dim](one per line, empty line to finish)[/dim]")
+    context_page_urls: list[str] = []
+    while True:
+        url = typer.prompt("  >", default="", show_default=False)
+        if not url:
+            break
+        context_page_urls.append(url.strip())
+    context_pages = "\n".join(context_page_urls)
     console.print()
 
     async with NotionMCPSession(token=notion_token) as session:
@@ -235,6 +245,8 @@ async def _run_add_hire(notion_token: str, database_id: str) -> None:
                 notes=notes,
                 contact_email=email.strip(),
                 slack_handle=slack.strip(),
+                supervisor_slack=supervisor.strip().lstrip("@"),
+                context_pages=context_pages,
             )
         except Exception as exc:
             console.print(f"[bold red]Error:[/bold red] Could not create row — {exc}")

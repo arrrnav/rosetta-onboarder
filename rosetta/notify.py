@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 # Import SlackApiError once at module level (lazy — only if slack_sdk installed)
 _SlackApiError: type | None = None
 
+# ---------------------------------------------------------------------------
+# Slack members cache — users.list is Tier 2 rate-limited; cache for 60 s so
+# notify_hire and notify_supervisor share one fetch per pipeline run.
+# ---------------------------------------------------------------------------
+_members_cache: dict = {}
+_MEMBERS_CACHE_TTL = 60.0  # seconds
+
 
 def _get_slack_api_error():
     global _SlackApiError
@@ -62,6 +69,91 @@ def notify_hire(hire: OnboardingInput, wiki_url: str, wiki_page_id: str = "") ->
             _send_slack(hire, wiki_url, wiki_page_id)
         except Exception:
             logger.exception("Slack notification failed for %s", hire.name)
+
+
+def notify_supervisor(
+    hire: OnboardingInput,
+    access_requirements: list[str],
+    wiki_url: str,
+) -> None:
+    """
+    DM the supervisor that a new hire's wiki is ready, with any provisioning
+    requirements the agent identified.
+
+    Skips only if supervisor_slack is not set or SLACK_BOT_TOKEN is missing.
+    Sends even when access_requirements is empty — the wiki-ready heads-up
+    is useful regardless.
+    """
+    logger.info(
+        "Supervisor notification: hire=%s supervisor_slack=%r",
+        hire.name, hire.supervisor_slack,
+    )
+    if not hire.supervisor_slack:
+        logger.debug("Supervisor notification skipped for %s — no supervisor_slack set", hire.name)
+        return
+    client = _slack_client()
+    if not client:
+        logger.warning(
+            "Supervisor notification skipped for %s — SLACK_BOT_TOKEN not set",
+            hire.name,
+        )
+        return
+    try:
+        members = _fetch_members(client)
+        handle = _normalize_handle(hire.supervisor_slack.lstrip("@"))
+        logger.debug(
+            "Supervisor resolution: looking for handle=%r across %d workspace members",
+            handle, len(members),
+        )
+        user_id = next(
+            (
+                m["id"]
+                for m in members
+                if _normalize_handle(m.get("name", "")) == handle
+                or _normalize_handle(m.get("profile", {}).get("display_name", "")) == handle
+                or _normalize_handle(m.get("profile", {}).get("display_name_normalized", "")) == handle
+                or _normalize_handle(m.get("profile", {}).get("real_name", "")) == handle
+                or _normalize_handle(m.get("profile", {}).get("real_name_normalized", "")) == handle
+            ),
+            None,
+        )
+        if not user_id:
+            logger.warning(
+                "Could not resolve supervisor %r to a Slack user ID — "
+                "checked name, display_name, display_name_normalized, real_name, real_name_normalized. "
+                "Workspace members: %s",
+                hire.supervisor_slack,
+                [
+                    {
+                        "name": m.get("name"),
+                        "display_name": m.get("profile", {}).get("display_name"),
+                        "real_name": m.get("profile", {}).get("real_name"),
+                    }
+                    for m in members
+                    if not m.get("is_bot") and not m.get("deleted")
+                ],
+            )
+            return
+        if access_requirements:
+            items = "\n".join(f"  • {req}" for req in access_requirements)
+            access_block = (
+                f"\n\nBased on their assigned repositories, the following access will "
+                f"likely need to be provisioned before they start:\n\n{items}"
+            )
+        else:
+            access_block = ""
+        message = (
+            f"*{hire.name}* ({hire.role}) is joining and their onboarding wiki is ready: "
+            f"{wiki_url}{access_block}"
+        )
+        client.chat_postMessage(channel=user_id, text=message)
+        logger.info(
+            "Supervisor notification sent to @%s for %s",
+            hire.supervisor_slack,
+            hire.name,
+        )
+    except Exception:
+        logger.exception("Supervisor notification failed for %s", hire.name)
 
 
 def notify_light_refresh(hire: OnboardingInput, wiki_url: str) -> None:
@@ -143,6 +235,27 @@ def _send_email(hire: OnboardingInput, wiki_url: str) -> None:
 # Slack helpers
 # ---------------------------------------------------------------------------
 
+def _fetch_members(client) -> list[dict]:
+    """Return workspace members, using a 60-second in-process cache."""
+    import time
+    now = time.monotonic()
+    if (
+        _members_cache.get("members")
+        and now - _members_cache.get("fetched_at", 0.0) < _MEMBERS_CACHE_TTL
+    ):
+        return _members_cache["members"]
+    result = client.users_list()
+    members = result.get("members", [])
+    _members_cache["members"] = members
+    _members_cache["fetched_at"] = now
+    return members
+
+
+def _normalize_handle(s: str) -> str:
+    """Lowercase and normalise apostrophe variants so curly quotes match straight ones."""
+    return s.lower().replace("\u2019", "'").replace("\u2018", "'")
+
+
 def _slack_client():
     """Return an initialised WebClient, or None if SLACK_BOT_TOKEN is not set."""
     token = os.getenv("SLACK_BOT_TOKEN", "")
@@ -163,11 +276,11 @@ def _resolve_slack_user_id(hire: OnboardingInput, client) -> str | None:
     """Resolve hire.slack_handle to a Slack user ID. Returns None if not found."""
     SlackApiError = _get_slack_api_error()
     try:
-        result = client.users_list()
+        members = _fetch_members(client)
         user_id = next(
             (
                 m["id"]
-                for m in result["members"]
+                for m in members
                 if m.get("name") == hire.slack_handle
                 or m.get("profile", {}).get("display_name") == hire.slack_handle
             ),

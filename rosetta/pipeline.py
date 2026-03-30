@@ -67,6 +67,34 @@ async def run_onboard_pipeline(
         logger.info("Pipeline: starting onboard for %s (%s)", hire.name, hire.role)
         await session.update_hire_row(page_id, "Processing")
 
+        # Fetch context pages (team docs, runbooks, ADRs) to enrich the agent's context
+        context_pages_text = ""
+        logger.info(
+            "Pipeline: %d context page ID(s) to fetch for %s",
+            len(hire.context_page_ids), hire.name,
+        )
+        for ctx_page_id in hire.context_page_ids:
+            try:
+                text = await session.fetch_notion_page_text(ctx_page_id)
+                if text:
+                    context_pages_text += text + "\n\n"
+                    logger.info(
+                        "Pipeline: fetched context page %s (%d chars)",
+                        ctx_page_id, len(text),
+                    )
+                else:
+                    logger.warning("Pipeline: context page %s returned no text", ctx_page_id)
+            except Exception:
+                logger.warning(
+                    "Pipeline: could not fetch context page %s — skipping", ctx_page_id
+                )
+
+        if hire.context_page_ids:
+            logger.info(
+                "Pipeline: %d context page(s) → %d total chars passed to agent",
+                len(hire.context_page_ids), len(context_pages_text.strip()),
+            )
+
         try:
             wiki_url, wiki_page_id, wiki = await run_onboarding_agent(
                 hire=hire,
@@ -74,6 +102,7 @@ async def run_onboard_pipeline(
                 notion_session=session,
                 parent_page_id=parent_page_id,
                 model=model,
+                context_pages_text=context_pages_text.strip(),
             )
         except Exception:
             logger.exception("Pipeline: agent failed for %s — rolling back to Ready", hire.name)
@@ -82,13 +111,18 @@ async def run_onboard_pipeline(
 
         await session.update_hire_row(page_id, "Done", wiki_url=wiki_url)
         logger.info("Pipeline: wiki created for %s — %s", hire.name, wiki_url)
+        logger.info(
+            "Pipeline: access_requirements for %s: %s",
+            hire.name, wiki.access_requirements or "(none)",
+        )
 
         # Index embeddings for RAG chat
         _index_embeddings(wiki, wiki_page_id, hire.repo_urls, fetcher)
 
         # Notify the new hire (after indexing so the Slack bot can answer immediately)
-        from .notify import notify_hire
+        from .notify import notify_hire, notify_supervisor
         notify_hire(hire, wiki_url, wiki_page_id=wiki_page_id)
+        notify_supervisor(hire, wiki.access_requirements, wiki_url)
 
     return wiki_url, wiki_page_id, wiki
 

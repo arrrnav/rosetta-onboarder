@@ -62,7 +62,22 @@ Wiki sections (include all 8, in this order):
 8. Resources & Links — links to repos, issue trackers, docs, and any other useful resources
 
 Tone: warm, direct, and specific. Avoid generic filler. Tailor every section to \
-this person's role and their specific repos.\
+this person's role and their specific repos.
+
+Provisioning detection (access_requirements field in create_notion_wiki):
+Identify every system, service, or credential the new hire will likely need \
+provisioned — drawing from BOTH the GitHub repository content AND any additional \
+context from team documentation provided in this message. Infer from: cloud \
+provider configs or deploy scripts (AWS, GCP, Azure), keys in .env.example or \
+README, Docker/container registry references, database connection strings or \
+migration files, third-party service integrations (Stripe, Twilio, SendGrid, etc.), \
+internal tooling references (Datadog, PagerDuty, Sentry, Vault, Jira, Confluence, \
+LaunchDarkly, etc.), VPN or SSH requirements, CI/CD secrets (GitHub Actions, \
+CircleCI, etc.), GitHub org-level permissions, and any access or provisioning \
+requirements explicitly listed in the team documentation context. \
+List each item concisely, e.g. "AWS IAM (S3 + Lambda)", "PostgreSQL credentials", \
+"Datadog account", "Docker registry (ghcr.io)". Only leave access_requirements \
+empty if the repos genuinely require nothing beyond a standard developer laptop setup.\
 """
 
 _REFRESH_SYSTEM_PROMPT = """\
@@ -98,15 +113,20 @@ Tone: factual and direct. No filler. No welcome tone.\
 """
 
 
-def _user_message(hire: OnboardingInput) -> str:
+def _user_message(hire: OnboardingInput, context_pages_text: str = "") -> str:
     repos = "\n".join(f"  - {url}" for url in hire.repo_urls)
     notes = f"\n\nAdditional notes from the team lead:\n{hire.notes}" if hire.notes.strip() else ""
+    context = (
+        f"\n\nAdditional context from team documentation:\n{context_pages_text}"
+        if context_pages_text.strip() else ""
+    )
     return (
         f"Please create an onboarding wiki for:\n\n"
         f"Name: {hire.name}\n"
         f"Role: {hire.role}\n"
         f"Assigned repositories:\n{repos}"
-        f"{notes}\n\n"
+        f"{notes}"
+        f"{context}\n\n"
         f"Research the repositories using the available tools, then call "
         f"create_notion_wiki to produce the final wiki."
     )
@@ -138,6 +158,7 @@ async def _run_agent_loop(
     parent_page_id: str,
     model: str | None = None,
     max_iterations: int = 15,
+    context_pages_text: str = "",
 ) -> tuple[str, str, WikiPage]:
     """Shared agent loop — used by both onboarding and refresh agents."""
     resolved_model = model or os.getenv("CLAUDE_MODEL")
@@ -219,6 +240,7 @@ async def run_onboarding_agent(
     parent_page_id: str,
     model: str | None = None,
     max_iterations: int = 15,
+    context_pages_text: str = "",
 ) -> tuple[str, str, WikiPage]:
     """
     Run the Claude agentic loop for one new hire.
@@ -228,13 +250,14 @@ async def run_onboarding_agent(
     """
     return await _run_agent_loop(
         system_prompt=_SYSTEM_PROMPT,
-        initial_user_message=_user_message(hire),
+        initial_user_message=_user_message(hire, context_pages_text),
         hire=hire,
         fetcher=fetcher,
         notion_session=notion_session,
         parent_page_id=parent_page_id,
         model=model,
         max_iterations=max_iterations,
+        context_pages_text=context_pages_text,
     )
 
 

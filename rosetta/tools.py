@@ -159,6 +159,18 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "required": ["heading", "content"],
                     },
                 },
+                "access_requirements": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Concise list of systems, credentials, or permissions the new hire will need "
+                        "provisioned to be productive. Infer from repo content even when not explicitly "
+                        "stated — e.g. 'AWS IAM (S3 + Lambda)', 'PostgreSQL credentials', "
+                        "'Docker registry access', 'VPN access', 'PagerDuty account'. "
+                        "Leave empty only if the repos truly require no special access beyond standard "
+                        "developer setup."
+                    ),
+                },
             },
             "required": ["title", "sections"],
         },
@@ -258,7 +270,11 @@ class ToolDispatcher:
                 WikiSection(heading=s["heading"], content=s["content"])
                 for s in tool_input["sections"]
             ]
-            wiki = WikiPage(title=tool_input["title"], sections=sections)
+            wiki = WikiPage(
+                title=tool_input["title"],
+                sections=sections,
+                access_requirements=tool_input.get("access_requirements", []),
+            )
             url, page_id = await self._notion.create_wiki_page(wiki, self._parent_page_id)
             self.created_wiki = wiki
             self.created_wiki_page_id = page_id

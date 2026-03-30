@@ -41,8 +41,10 @@ class OnboardingInput:
     repo_urls: list[str]
     notes: str
     db_row_id: str       # Notion page ID of the DB row — used to write Status + wiki URL back
-    contact_email: str = ""   # Optional — used to send email notification after wiki creation
-    slack_handle: str = ""    # Optional — used to send Slack DM after wiki creation
+    contact_email: str = ""    # Optional — used to send email notification after wiki creation
+    slack_handle: str = ""     # Optional — used to send Slack DM after wiki creation
+    supervisor_slack: str = "" # Optional — Slack handle of the new hire's direct manager
+    context_page_ids: list[str] = field(default_factory=list)  # Notion page IDs to include as extra context
 
     @classmethod
     def empty(cls, db_row_id: str) -> "OnboardingInput":
@@ -90,6 +92,7 @@ class WikiPage:
 
     title: str
     sections: list[WikiSection] = field(default_factory=list)
+    access_requirements: list[str] = field(default_factory=list)  # Provisioning items flagged by agent
 
     def to_notion_blocks(self) -> list[dict]:
         """
